@@ -1,0 +1,25 @@
+# Maven build output (includes generated gRPC/Protobuf classes)
+target/
+
+# Video files: too large for git
+uploads/
+videos/*
+!videos/.gitkeep
+*.mp4
+
+# IDEs / editors
+.vscode/
+.idea/
+*.iml
+.settings/
+.project
+.classpath
+.factorypath
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
