@@ -65,6 +65,21 @@
         </extensions>
 
         <plugins>
+            <!-- also run os detection as a plugin so VS Code / Eclipse (m2e) can resolve ${os.detected.classifier} -->
+            <plugin>
+                <groupId>kr.motd.maven</groupId>
+                <artifactId>os-maven-plugin</artifactId>
+                <version>1.7.1</version>
+                <executions>
+                    <execution>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>detect</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <!-- generates Java classes from src/main/proto/*.proto on mvn compile -->
             <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId>
