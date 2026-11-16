@@ -85,6 +85,8 @@ video-upload/
     ├── proto/
     │   └── video_upload.proto   # gRPC service + message definitions
     └── java/upload/
+        ├── common/
+        │   └── Config.java          # shared constants (port, chunk size, folders)
         ├── producer/
         │   └── ProducerMain.java
         └── consumer/
