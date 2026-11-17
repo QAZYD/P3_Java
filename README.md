@@ -101,6 +101,13 @@ been visually tested. `mvn javafx:run` without `--gui` runs headless.
 
 ## Lifecycle and concurrency
 
+`ConsumerMain` uses ordinary classes and methods: `Settings` stores configuration,
+`ServerRuntime` starts and stops the server, and `GuiApplication` connects the JavaFX
+lifecycle. Named classes implement the required callback methods: `UploadCallback.accept`,
+`ShutdownTask.run` and `WindowCloseHandler.handle`. Production consumer code uses no
+records, lambdas or method references. Shutdown waits are separated into `stopServer`
+and `stopExecutor` methods. The existing regression tests remain unchanged.
+
 The fixed executor limits executing gRPC callbacks, not upload streams or pending
 videos. gRPC can interleave independent streams; Person 1 must retain state per stream.
 There are no artificial production delays. The server stays alive in headless mode
