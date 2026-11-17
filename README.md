@@ -54,14 +54,14 @@ The following commands work on macOS and Windows CMD/PowerShell:
 ```text
 mvn clean compile
 mvn test
-mvn exec:java "-Dexec.mainClass=upload.consumer.ConsumerMain" "-Dexec.args=50051 4 uploads"
+mvn exec:java "-Dexec.mainClass=upload.consumer.ConsumerMain" "-Dexec.args=--headless 50051 4 uploads"
 ```
 
-The consumer runs headless by default. With no `exec.args`, defaults are port
+The consumer starts JavaFX by default. With `--headless`, defaults are port
 `50051`, four gRPC callback threads, and `uploads` under the working directory.
 
 ```text
-ConsumerMain [--gui] [port] [grpcThreads] [uploadDirectory]
+ConsumerMain [--headless] [port] [grpcThreads] [uploadDirectory]
 ```
 
 Trailing positional arguments may be omitted. Ports must be 1–65535 and thread
@@ -80,36 +80,34 @@ mvn dependency:build-classpath "-Dmdep.outputFile=target/runtime-classpath.txt" 
 
 macOS/Linux:
 ```sh
-java -cp "target/classes:$(cat target/runtime-classpath.txt)" upload.consumer.ConsumerMain 50051 4 uploads
+java -cp "target/classes:$(cat target/runtime-classpath.txt)" upload.consumer.ConsumerMain --headless 50051 4 uploads
 ```
 
 Windows PowerShell:
 ```powershell
 $consumerClasspath = "target/classes;" + (Get-Content target/runtime-classpath.txt -Raw).Trim()
-java -cp $consumerClasspath upload.consumer.ConsumerMain 50051 4 uploads
+java -cp $consumerClasspath upload.consumer.ConsumerMain --headless 50051 4 uploads
 ```
 
 GUI lifecycle wiring is available via:
 
 ```text
-mvn javafx:run "-Djavafx.args=--gui 50051 4 uploads"
+mvn javafx:run "-Djavafx.args=50051 4 uploads"
 ```
 
 **PreviewWindow is still a placeholder and does not show a window.** Use headless
 mode until Person 4 completes it. GUI playback and window-close behavior have not
-been visually tested. `mvn javafx:run` without `--gui` runs headless.
+been visually tested. `mvn javafx:run` starts JavaFX. For server-only testing, use the `--headless` command above.
 
 ## Lifecycle and concurrency
 
-`ConsumerMain` uses ordinary classes and methods: `Settings` stores configuration,
-`ServerRuntime` starts and stops the server, and `GuiApplication` connects the JavaFX
-lifecycle. Named classes implement the required callback methods: `UploadCallback.accept`,
-`ShutdownTask.run` and `WindowCloseHandler.handle`. Production consumer code uses no
-records, lambdas or method references. Shutdown waits are separated into `stopServer`
-and `stopExecutor` methods. The helper classes appear first as package-private classes
-in `ConsumerMain.java`; the public `ConsumerMain` class and its nested `GuiApplication`
-appear last. Everything stays in one file. Regression tests reference `Settings` and
-`ServerRuntime` directly.
+`ConsumerMain` follows the team's original JavaFX skeleton: it extends `Application`
+and overrides `start(Stage)` and `stop()`. Its fields hold the port, gRPC thread
+count, upload directory, server and executor. `start(Stage)` creates the window on
+the JavaFX thread and starts gRPC; `stop()` starts background cleanup. `main()`
+launches JavaFX by default and accepts `--headless` for server-only testing while
+the GUI is unfinished. A small `startServer()` helper accepts a test service, so the
+server can be tested independently of Person 1's unfinished upload service.
 
 The fixed executor limits executing gRPC callbacks, not upload streams or pending
 videos. gRPC can interleave independent streams; Person 1 must retain state per stream.
@@ -167,11 +165,9 @@ CLI parameters for `c` and `q` only when the team implements this boundary.
 ## Tests and media fixtures
 
 `mvn test` runs `ConsumerMainTest` using a **test-only** gRPC service, real local TCP,
-and the unchanged generated upload messages. It tests validation, directory creation,
-occupied ports, rebinding after shutdown, idempotent cleanup, interruption, forced
-cancellation and six requests with three seconds of work each on four executor threads.
-Atomic counters verify overlapping execution and all six replies; elapsed time is diagnostic,
-not the sole assertion. This does not test upload processing, queue capacity or GUI rendering.
+and the unchanged generated upload messages. It checks invalid arguments, six
+successful concurrent requests, a measured peak of four callbacks, and repeated
+shutdown. It does not test actual uploads, queue capacity, or GUI rendering.
 
 Check listening sockets while the consumer runs:
 
@@ -201,24 +197,8 @@ network. GUI mode needs a desktop; headless mode supports a server-only VM.
 
 Windows, JavaFX media playback, real uploads and two-VM operation remain unverified.
 
-## Verification record — November 17, 2026
+## Verification record
 
-- Baseline `mvn clean compile`: passed after allowing Maven cache access; the initial
-  sandbox failure was a filesystem permission error, not a compilation error.
-- Implemented code: `mvn clean test` passed on Maven's default JDK 27 and on installed
-  Temurin 17.0.11. Final Java 17 `mvn test`: **6 tests, 0 failures/errors/skips**, including
-  graceful completion of an active request and simultaneous shutdown callers.
-- Final concurrency run: six successful replies in **6.08 seconds**, measured peak
-  **4 executing handlers**. These are test-service requests, not actual MP4 uploads.
-- Standalone Java 17 process: port **50051** verified with `lsof`, correct default logging,
-  writable `uploads` directory, process remained alive until SIGINT. Shutdown logs appeared,
-  process exited and the port no longer accepted connections.
-- Eight malformed CLI cases were also tested as separate processes: invalid port range,
-  invalid thread counts, nonnumeric arguments and an existing file as upload directory.
-- Occupied-port failure, port reuse, forced cancellation and preserved interrupt status passed.
-- No Windows, real upload/hash, JavaFX playback/window-close, queue-overflow or VM tests
-  were performed. FFmpeg is absent, so synthetic fixture generation remains pending.
-
-The Apple Silicon machine has an x86_64 Java 17 installation; Maven detected that JVM
-architecture during Java 17 testing. Headless tests passed. This does not validate JavaFX
-native playback across architectures.
+Run `mvn clean test` on Java 17. The current skeleton-shaped implementation was
+compiled and tested locally; see the latest test output for the actual result.
+Real uploads, GUI playback, Windows and two-VM operation remain unverified.

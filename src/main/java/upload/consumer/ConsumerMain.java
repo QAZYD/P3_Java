@@ -6,8 +6,6 @@ import io.grpc.ServerBuilder;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.stage.Stage;
-import javafx.stage.WindowEvent;
-import javafx.event.EventHandler;
 import upload.common.Config;
 
 import java.io.IOException;
@@ -18,298 +16,159 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-// An ordinary class holds the command-line settings.
-final class Settings {
-    private final int port;
-    private final int grpcThreads;
-    private final Path uploadDirectory;
-    private final boolean gui;
+/** Person 2: create the window and server, then stop both when the app closes. */
+public class ConsumerMain extends Application implements Consumer<Path>, Runnable {
+    private int port = Config.PORT;
+    private int grpcThreads = 4;
+    private Path uploadDirectory = Config.UPLOADS_DIR.toAbsolutePath().normalize();
+    private PreviewWindow window;
+    private Server server;
+    private ExecutorService executor;
+    private Thread shutdownHook;
+    private boolean stopped;
 
-    Settings(int port, int grpcThreads, Path uploadDirectory, boolean gui) {
-        this.port = port;
-        this.grpcThreads = grpcThreads;
-        this.uploadDirectory = uploadDirectory;
-        this.gui = gui;
-    }
+    // JavaFX creates this object using this constructor.
+    public ConsumerMain() {}
 
-    int port() {
-        return port;
-    }
-
-    int grpcThreads() {
-        return grpcThreads;
-    }
-
-    Path uploadDirectory() {
-        return uploadDirectory;
-    }
-
-    boolean gui() {
-        return gui;
-    }
-
-    static Settings parse(String... args) {
-        boolean gui = args.length > 0 && args[0].equals("--gui");
-        int first = 0;
-        if (gui) {
-            first = 1;
-        }
-        if (args.length - first > 3) {
-            throw new IllegalArgumentException("Expected at most three positional arguments.");
-        }
-        int port = number(args, first, Config.PORT, "Port");
-        int threads = number(args, first + 1, 4, "gRPC thread count");
-        if (port < 1 || port > 65535) {
-            throw new IllegalArgumentException("Port must be between 1 and 65535.");
-        }
-        if (threads < 1) {
-            throw new IllegalArgumentException("gRPC thread count must be greater than zero.");
-        }
-        String directory = Config.UPLOADS_DIR.toString();
-        if (args.length > first + 2) {
-            directory = args[first + 2];
-        }
-        if (directory.isBlank()) throw new IllegalArgumentException("Upload directory must not be blank.");
-        return new Settings(port, threads, Path.of(directory).toAbsolutePath().normalize(), gui);
-    }
-
-    private static int number(String[] args, int index, int fallback, String label) {
-        if (args.length <= index) {
-            return fallback;
-        }
+    // Read optional port, thread count, and upload directory.
+    void configure(String... args) {
+        if (args.length > 3) throw new IllegalArgumentException("Expected at most three arguments.");
         try {
-            return Integer.parseInt(args[index]);
+            if (args.length > 0) port = Integer.parseInt(args[0]);
+            if (args.length > 1) grpcThreads = Integer.parseInt(args[1]);
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(label + " must be an integer.");
+            throw new IllegalArgumentException("Port and thread count must be integers.");
+        }
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Port must be 1–65535.");
+        if (grpcThreads < 1) throw new IllegalArgumentException("Thread count must be positive.");
+        if (args.length > 2) {
+            if (args[2].isBlank()) throw new IllegalArgumentException("Upload directory cannot be blank.");
+            uploadDirectory = Path.of(args[2]).toAbsolutePath().normalize();
         }
     }
 
-    void prepareDirectory() throws IOException {
+    // 1. JavaFX calls start(Stage). Create Person 4's window on the JavaFX thread.
+    // 2. Give Person 1's upload service this object's accept(Path) callback.
+    // 3. Start gRPC with a fixed executor.
+    @Override
+    public void start(Stage stage) {
+        try {
+            configure(getParameters().getRaw().toArray(new String[0]));
+            window = new PreviewWindow(stage);
+            startServer(new VideoUploadService(uploadDirectory, this));
+        } catch (IOException | RuntimeException e) {
+            System.err.println("[SERVER] Cannot start consumer: " + e.getMessage());
+            Platform.exit();
+        }
+    }
+
+    private void prepareDirectory() throws IOException {
         Files.createDirectories(uploadDirectory);
         if (!Files.isDirectory(uploadDirectory) || !Files.isWritable(uploadDirectory)) {
-            throw new IOException("Upload path must be a writable directory: " + uploadDirectory);
+            throw new IOException("Upload path is not a writable directory: " + uploadDirectory);
         }
-        // Check actual creation permissions, including filesystem ACLs.
-        Path probe = Files.createTempFile(uploadDirectory, ".consumer-write-check-", ".tmp");
-        Files.delete(probe);
-    }
-}
-
-/** Injectable service boundary permits independent tests without implementing uploads. */
-final class ServerRuntime implements AutoCloseable {
-    private final Server server;
-    private final ExecutorService executor;
-    private final long timeoutMillis;
-    private boolean closed;
-
-    private ServerRuntime(Server server, ExecutorService executor, long timeoutMillis) {
-        this.server = server;
-        this.executor = executor;
-        this.timeoutMillis = timeoutMillis;
+        Path check = Files.createTempFile(uploadDirectory, ".write-check-", ".tmp");
+        Files.delete(check);
     }
 
-    static ServerRuntime start(Settings settings, BindableService service, long timeoutMillis) throws IOException {
-        settings.prepareDirectory();
+    // A test can pass a small service while Person 1's upload handler is unfinished.
+    synchronized void startServer(BindableService service) throws IOException {
+        if (server != null || stopped) throw new IllegalStateException("Server already started or stopped.");
+        prepareDirectory();
         System.out.println("[SERVER] Starting consumer...");
-        System.out.println("[SERVER] Port: " + settings.port());
-        System.out.println("[SERVER] gRPC executor threads: " + settings.grpcThreads());
-        System.out.println("[SERVER] Upload directory: " + settings.uploadDirectory());
-        ExecutorService executor = Executors.newFixedThreadPool(settings.grpcThreads());
-        Server server = null;
+        System.out.println("[SERVER] Port: " + port);
+        System.out.println("[SERVER] gRPC executor threads: " + grpcThreads);
+        System.out.println("[SERVER] Upload directory: " + uploadDirectory);
+        executor = Executors.newFixedThreadPool(grpcThreads);
         try {
-            server = ServerBuilder.forPort(settings.port()).executor(executor).addService(service).build();
-            server.start();
+            server = ServerBuilder.forPort(port).executor(executor).addService(service).build().start();
+            shutdownHook = new Thread(this, "consumer-shutdown");
+            Runtime.getRuntime().addShutdownHook(shutdownHook);
             System.out.println("[SERVER] Ready to receive uploads");
-            return new ServerRuntime(server, executor, timeoutMillis);
         } catch (IOException | RuntimeException e) {
-            if (server != null) server.shutdownNow();
-            executor.shutdownNow();
+            stopServer();
             throw e;
         }
     }
 
-    int port() {
-        return server.getPort();
-    }
-
-    boolean isTerminated() {
-        return server.isTerminated() && executor.isTerminated();
-    }
-
-    void awaitTermination() throws InterruptedException {
-        server.awaitTermination();
-    }
-
-    // Synchronization makes concurrent callers wait for the same cleanup to finish.
-    @Override public synchronized void close() {
-        if (closed) return;
-        closed = true;
-        System.out.println("[SERVER] Shutting down...");
-        boolean interrupted = false;
-        server.shutdown();
-        try {
-            stopServer();
-        } catch (InterruptedException e) {
-            interrupted = true;
-            server.shutdownNow();
-        }
-
-        try {
-            stopExecutor();
-        } catch (InterruptedException e) {
-            interrupted = true;
-            executor.shutdownNow();
-        }
-
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-        System.out.println("[SERVER] Shutdown complete (termination requested for all resources)");
-    }
-
-    private void stopServer() throws InterruptedException {
-        if (!server.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-            server.shutdownNow();
-            if (!server.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                System.err.println("[SERVER] gRPC termination timed out.");
-            }
-        }
-    }
-
-    private void stopExecutor() throws InterruptedException {
-        executor.shutdown();
-        if (!executor.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-            executor.shutdownNow();
-            if (!executor.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                System.err.println("[SERVER] Executor tasks did not respond to interruption.");
-            }
-        }
-    }
-}
-
-// The upload service calls accept() when a file is complete.
-final class UploadCallback implements Consumer<Path> {
-    private final PreviewWindow window;
-
-    UploadCallback(PreviewWindow window) {
-        this.window = window;
-    }
-
+    // 4. JavaFX calls stop() when the window closes. Cleanup may wait, so use a thread.
     @Override
-    public void accept(Path path) {
-        if (window == null) {
-            System.out.println("[UPLOAD COMPLETE] " + path);
-        } else {
-            window.addVideo(path);
-        }
-    }
-}
-
-// Both the JVM hook and GUI cleanup thread run this same task.
-final class ShutdownTask implements Runnable {
-    private final ServerRuntime runtime;
-    private final Thread hook;
-
-    ShutdownTask(ServerRuntime runtime, Thread hook) {
-        this.runtime = runtime;
-        this.hook = hook;
+    public void stop() {
+        new Thread(this, "consumer-window-shutdown").start();
     }
 
+    // Runnable lets the window-close thread and JVM shutdown hook share cleanup.
     @Override
     public void run() {
-        runtime.close();
-        if (hook != null) {
-            ConsumerMain.removeHook(hook);
-        }
-    }
-}
-
-final class WindowCloseHandler implements EventHandler<WindowEvent> {
-    @Override
-    public void handle(WindowEvent event) {
-        Platform.exit();
-    }
-}
-
-/** Person 2: configuration, server lifecycle and component wiring. */
-public final class ConsumerMain {
-    private ConsumerMain() {}
-
-    private static ServerRuntime start(Settings settings, Consumer<Path> callback) throws IOException {
-        return ServerRuntime.start(settings, new VideoUploadService(settings.uploadDirectory(), callback), 5000);
+        stopServer();
     }
 
-    private static Thread registerHook(ServerRuntime runtime) {
-        Thread hook = new Thread(new ShutdownTask(runtime, null), "consumer-shutdown");
-        try {
-            Runtime.getRuntime().addShutdownHook(hook);
-        } catch (RuntimeException e) {
-            runtime.close();
-            throw e;
-        }
-        return hook;
-    }
-
-    static void removeHook(Thread hook) {
-        try {
-            Runtime.getRuntime().removeShutdownHook(hook);
-        } catch (IllegalStateException ignored) {
-            // JVM shutdown already owns the hook.
-        }
-    }
-
-    public static void main(String[] args) {
-        try {
-            Settings settings = Settings.parse(args);
-            if (settings.gui()) {
-                Application.launch(GuiApplication.class, args);
-                return;
-            }
-            ServerRuntime runtime = start(settings, new UploadCallback(null));
-            Thread hook = registerHook(runtime);
+    synchronized void stopServer() {
+        if (stopped) return;
+        stopped = true;
+        System.out.println("[SERVER] Shutting down...");
+        boolean interrupted = false;
+        if (server != null) {
+            server.shutdown();
             try {
-                runtime.awaitTermination();
-            } finally {
-                runtime.close();
-                removeHook(hook);
+                if (!server.awaitTermination(5, TimeUnit.SECONDS)) {
+                    server.shutdownNow();
+                    server.awaitTermination(5, TimeUnit.SECONDS);
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                server.shutdownNow();
             }
+        }
+        if (executor != null) {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                    executor.awaitTermination(5, TimeUnit.SECONDS);
+                }
+            } catch (InterruptedException e) {
+                interrupted = true;
+                executor.shutdownNow();
+            }
+        }
+        if (shutdownHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException ignored) {
+                // JVM shutdown has already begun.
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+        System.out.println("[SERVER] Shutdown complete");
+    }
+
+    // Person 1 calls accept() after a video is complete.
+    @Override
+    public void accept(Path file) {
+        if (window == null) System.out.println("[UPLOAD COMPLETE] " + file);
+        else window.addVideo(file);
+    }
+
+    // Run with the JavaFX window by default. Use --headless until Person 4 finishes it.
+    public static void main(String[] args) {
+        if (args.length == 0 || !args[0].equals("--headless")) {
+            launch(args);
+            return;
+        }
+        ConsumerMain consumer = new ConsumerMain();
+        try {
+            String[] options = java.util.Arrays.copyOfRange(args, 1, args.length);
+            consumer.configure(options);
+            consumer.startServer(new VideoUploadService(consumer.uploadDirectory, consumer));
+            consumer.server.awaitTermination();
         } catch (IllegalArgumentException | IOException e) {
             System.err.println("[SERVER] Cannot start consumer: " + e.getMessage());
-            System.err.println("Usage: ConsumerMain [--gui] [port] [grpcThreads] [uploadDirectory]");
+            System.err.println("Usage: ConsumerMain [--headless] [port] [grpcThreads] [uploadDirectory]");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        }
-    }
-
-    /** Lifecycle adapter only; Person 4 owns all window content and media behavior. */
-    public static final class GuiApplication extends Application {
-        private ServerRuntime runtime;
-        private Thread hook;
-
-        @Override public void start(Stage stage) {
-            try {
-                Settings settings = Settings.parse(getParameters().getRaw().toArray(new String[0]));
-                PreviewWindow window = new PreviewWindow(stage);
-                runtime = ConsumerMain.start(settings, new UploadCallback(window));
-                hook = registerHook(runtime);
-                stage.setOnCloseRequest(new WindowCloseHandler());
-                System.out.println("[SERVER] GUI lifecycle connected; PreviewWindow must show its stage.");
-            } catch (IOException | RuntimeException e) {
-                System.err.println("[SERVER] Cannot start consumer GUI: " + e.getMessage());
-                if (runtime != null) closeInBackground();
-                Platform.exit();
-            }
-        }
-
-        private void closeInBackground() {
-            ShutdownTask task = new ShutdownTask(runtime, hook);
-            Thread cleanupThread = new Thread(task, "consumer-window-shutdown");
-            cleanupThread.start();
-        }
-
-        @Override public void stop() {
-            // Never wait for RPCs or executor tasks on the JavaFX application thread.
-            if (runtime != null) closeInBackground();
+        } finally {
+            consumer.stopServer();
         }
     }
 }
