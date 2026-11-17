@@ -18,178 +18,222 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+// An ordinary class holds the command-line settings.
+final class Settings {
+    private final int port;
+    private final int grpcThreads;
+    private final Path uploadDirectory;
+    private final boolean gui;
+
+    Settings(int port, int grpcThreads, Path uploadDirectory, boolean gui) {
+        this.port = port;
+        this.grpcThreads = grpcThreads;
+        this.uploadDirectory = uploadDirectory;
+        this.gui = gui;
+    }
+
+    int port() {
+        return port;
+    }
+
+    int grpcThreads() {
+        return grpcThreads;
+    }
+
+    Path uploadDirectory() {
+        return uploadDirectory;
+    }
+
+    boolean gui() {
+        return gui;
+    }
+
+    static Settings parse(String... args) {
+        boolean gui = args.length > 0 && args[0].equals("--gui");
+        int first = 0;
+        if (gui) {
+            first = 1;
+        }
+        if (args.length - first > 3) {
+            throw new IllegalArgumentException("Expected at most three positional arguments.");
+        }
+        int port = number(args, first, Config.PORT, "Port");
+        int threads = number(args, first + 1, 4, "gRPC thread count");
+        if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException("Port must be between 1 and 65535.");
+        }
+        if (threads < 1) {
+            throw new IllegalArgumentException("gRPC thread count must be greater than zero.");
+        }
+        String directory = Config.UPLOADS_DIR.toString();
+        if (args.length > first + 2) {
+            directory = args[first + 2];
+        }
+        if (directory.isBlank()) throw new IllegalArgumentException("Upload directory must not be blank.");
+        return new Settings(port, threads, Path.of(directory).toAbsolutePath().normalize(), gui);
+    }
+
+    private static int number(String[] args, int index, int fallback, String label) {
+        if (args.length <= index) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(args[index]);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(label + " must be an integer.");
+        }
+    }
+
+    void prepareDirectory() throws IOException {
+        Files.createDirectories(uploadDirectory);
+        if (!Files.isDirectory(uploadDirectory) || !Files.isWritable(uploadDirectory)) {
+            throw new IOException("Upload path must be a writable directory: " + uploadDirectory);
+        }
+        // Check actual creation permissions, including filesystem ACLs.
+        Path probe = Files.createTempFile(uploadDirectory, ".consumer-write-check-", ".tmp");
+        Files.delete(probe);
+    }
+}
+
+/** Injectable service boundary permits independent tests without implementing uploads. */
+final class ServerRuntime implements AutoCloseable {
+    private final Server server;
+    private final ExecutorService executor;
+    private final long timeoutMillis;
+    private boolean closed;
+
+    private ServerRuntime(Server server, ExecutorService executor, long timeoutMillis) {
+        this.server = server;
+        this.executor = executor;
+        this.timeoutMillis = timeoutMillis;
+    }
+
+    static ServerRuntime start(Settings settings, BindableService service, long timeoutMillis) throws IOException {
+        settings.prepareDirectory();
+        System.out.println("[SERVER] Starting consumer...");
+        System.out.println("[SERVER] Port: " + settings.port());
+        System.out.println("[SERVER] gRPC executor threads: " + settings.grpcThreads());
+        System.out.println("[SERVER] Upload directory: " + settings.uploadDirectory());
+        ExecutorService executor = Executors.newFixedThreadPool(settings.grpcThreads());
+        Server server = null;
+        try {
+            server = ServerBuilder.forPort(settings.port()).executor(executor).addService(service).build();
+            server.start();
+            System.out.println("[SERVER] Ready to receive uploads");
+            return new ServerRuntime(server, executor, timeoutMillis);
+        } catch (IOException | RuntimeException e) {
+            if (server != null) server.shutdownNow();
+            executor.shutdownNow();
+            throw e;
+        }
+    }
+
+    int port() {
+        return server.getPort();
+    }
+
+    boolean isTerminated() {
+        return server.isTerminated() && executor.isTerminated();
+    }
+
+    void awaitTermination() throws InterruptedException {
+        server.awaitTermination();
+    }
+
+    // Synchronization makes concurrent callers wait for the same cleanup to finish.
+    @Override public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        System.out.println("[SERVER] Shutting down...");
+        boolean interrupted = false;
+        server.shutdown();
+        try {
+            stopServer();
+        } catch (InterruptedException e) {
+            interrupted = true;
+            server.shutdownNow();
+        }
+
+        try {
+            stopExecutor();
+        } catch (InterruptedException e) {
+            interrupted = true;
+            executor.shutdownNow();
+        }
+
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        System.out.println("[SERVER] Shutdown complete (termination requested for all resources)");
+    }
+
+    private void stopServer() throws InterruptedException {
+        if (!server.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
+            server.shutdownNow();
+            if (!server.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
+                System.err.println("[SERVER] gRPC termination timed out.");
+            }
+        }
+    }
+
+    private void stopExecutor() throws InterruptedException {
+        executor.shutdown();
+        if (!executor.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
+            executor.shutdownNow();
+            if (!executor.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
+                System.err.println("[SERVER] Executor tasks did not respond to interruption.");
+            }
+        }
+    }
+}
+
+// The upload service calls accept() when a file is complete.
+final class UploadCallback implements Consumer<Path> {
+    private final PreviewWindow window;
+
+    UploadCallback(PreviewWindow window) {
+        this.window = window;
+    }
+
+    @Override
+    public void accept(Path path) {
+        if (window == null) {
+            System.out.println("[UPLOAD COMPLETE] " + path);
+        } else {
+            window.addVideo(path);
+        }
+    }
+}
+
+// Both the JVM hook and GUI cleanup thread run this same task.
+final class ShutdownTask implements Runnable {
+    private final ServerRuntime runtime;
+    private final Thread hook;
+
+    ShutdownTask(ServerRuntime runtime, Thread hook) {
+        this.runtime = runtime;
+        this.hook = hook;
+    }
+
+    @Override
+    public void run() {
+        runtime.close();
+        if (hook != null) {
+            ConsumerMain.removeHook(hook);
+        }
+    }
+}
+
+final class WindowCloseHandler implements EventHandler<WindowEvent> {
+    @Override
+    public void handle(WindowEvent event) {
+        Platform.exit();
+    }
+}
+
 /** Person 2: configuration, server lifecycle and component wiring. */
 public final class ConsumerMain {
     private ConsumerMain() {}
-
-    // An ordinary class holds the command-line settings.
-    static final class Settings {
-        private final int port;
-        private final int grpcThreads;
-        private final Path uploadDirectory;
-        private final boolean gui;
-
-        Settings(int port, int grpcThreads, Path uploadDirectory, boolean gui) {
-            this.port = port;
-            this.grpcThreads = grpcThreads;
-            this.uploadDirectory = uploadDirectory;
-            this.gui = gui;
-        }
-
-        int port() {
-            return port;
-        }
-
-        int grpcThreads() {
-            return grpcThreads;
-        }
-
-        Path uploadDirectory() {
-            return uploadDirectory;
-        }
-
-        boolean gui() {
-            return gui;
-        }
-
-        static Settings parse(String... args) {
-            boolean gui = args.length > 0 && args[0].equals("--gui");
-            int first = 0;
-            if (gui) {
-                first = 1;
-            }
-            if (args.length - first > 3) {
-                throw new IllegalArgumentException("Expected at most three positional arguments.");
-            }
-            int port = number(args, first, Config.PORT, "Port");
-            int threads = number(args, first + 1, 4, "gRPC thread count");
-            if (port < 1 || port > 65535) {
-                throw new IllegalArgumentException("Port must be between 1 and 65535.");
-            }
-            if (threads < 1) {
-                throw new IllegalArgumentException("gRPC thread count must be greater than zero.");
-            }
-            String directory = Config.UPLOADS_DIR.toString();
-            if (args.length > first + 2) {
-                directory = args[first + 2];
-            }
-            if (directory.isBlank()) throw new IllegalArgumentException("Upload directory must not be blank.");
-            return new Settings(port, threads, Path.of(directory).toAbsolutePath().normalize(), gui);
-        }
-
-        private static int number(String[] args, int index, int fallback, String label) {
-            if (args.length <= index) {
-                return fallback;
-            }
-            try {
-                return Integer.parseInt(args[index]);
-            } catch (NumberFormatException e) {
-                throw new IllegalArgumentException(label + " must be an integer.");
-            }
-        }
-
-        void prepareDirectory() throws IOException {
-            Files.createDirectories(uploadDirectory);
-            if (!Files.isDirectory(uploadDirectory) || !Files.isWritable(uploadDirectory)) {
-                throw new IOException("Upload path must be a writable directory: " + uploadDirectory);
-            }
-            // Check actual creation permissions, including filesystem ACLs.
-            Path probe = Files.createTempFile(uploadDirectory, ".consumer-write-check-", ".tmp");
-            Files.delete(probe);
-        }
-    }
-
-    /** Injectable service boundary permits independent tests without implementing uploads. */
-    static final class ServerRuntime implements AutoCloseable {
-        private final Server server;
-        private final ExecutorService executor;
-        private final long timeoutMillis;
-        private boolean closed;
-
-        private ServerRuntime(Server server, ExecutorService executor, long timeoutMillis) {
-            this.server = server;
-            this.executor = executor;
-            this.timeoutMillis = timeoutMillis;
-        }
-
-        static ServerRuntime start(Settings settings, BindableService service, long timeoutMillis) throws IOException {
-            settings.prepareDirectory();
-            System.out.println("[SERVER] Starting consumer...");
-            System.out.println("[SERVER] Port: " + settings.port());
-            System.out.println("[SERVER] gRPC executor threads: " + settings.grpcThreads());
-            System.out.println("[SERVER] Upload directory: " + settings.uploadDirectory());
-            ExecutorService executor = Executors.newFixedThreadPool(settings.grpcThreads());
-            Server server = null;
-            try {
-                server = ServerBuilder.forPort(settings.port()).executor(executor).addService(service).build();
-                server.start();
-                System.out.println("[SERVER] Ready to receive uploads");
-                return new ServerRuntime(server, executor, timeoutMillis);
-            } catch (IOException | RuntimeException e) {
-                if (server != null) server.shutdownNow();
-                executor.shutdownNow();
-                throw e;
-            }
-        }
-
-        int port() {
-            return server.getPort();
-        }
-
-        boolean isTerminated() {
-            return server.isTerminated() && executor.isTerminated();
-        }
-
-        void awaitTermination() throws InterruptedException {
-            server.awaitTermination();
-        }
-
-        // Synchronization makes concurrent callers wait for the same cleanup to finish.
-        @Override public synchronized void close() {
-            if (closed) return;
-            closed = true;
-            System.out.println("[SERVER] Shutting down...");
-            boolean interrupted = false;
-            server.shutdown();
-            try {
-                stopServer();
-            } catch (InterruptedException e) {
-                interrupted = true;
-                server.shutdownNow();
-            }
-
-            try {
-                stopExecutor();
-            } catch (InterruptedException e) {
-                interrupted = true;
-                executor.shutdownNow();
-            }
-
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-            System.out.println("[SERVER] Shutdown complete (termination requested for all resources)");
-        }
-
-        private void stopServer() throws InterruptedException {
-            if (!server.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                server.shutdownNow();
-                if (!server.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                    System.err.println("[SERVER] gRPC termination timed out.");
-                }
-            }
-        }
-
-        private void stopExecutor() throws InterruptedException {
-            executor.shutdown();
-            if (!executor.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                executor.shutdownNow();
-                if (!executor.awaitTermination(timeoutMillis, TimeUnit.MILLISECONDS)) {
-                    System.err.println("[SERVER] Executor tasks did not respond to interruption.");
-                }
-            }
-        }
-    }
 
     private static ServerRuntime start(Settings settings, Consumer<Path> callback) throws IOException {
         return ServerRuntime.start(settings, new VideoUploadService(settings.uploadDirectory(), callback), 5000);
@@ -206,7 +250,7 @@ public final class ConsumerMain {
         return hook;
     }
 
-    private static void removeHook(Thread hook) {
+    static void removeHook(Thread hook) {
         try {
             Runtime.getRuntime().removeShutdownHook(hook);
         } catch (IllegalStateException ignored) {
@@ -234,50 +278,6 @@ public final class ConsumerMain {
             System.err.println("Usage: ConsumerMain [--gui] [port] [grpcThreads] [uploadDirectory]");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        }
-    }
-
-    // The upload service calls accept() when a file is complete.
-    private static final class UploadCallback implements Consumer<Path> {
-        private final PreviewWindow window;
-
-        UploadCallback(PreviewWindow window) {
-            this.window = window;
-        }
-
-        @Override
-        public void accept(Path path) {
-            if (window == null) {
-                System.out.println("[UPLOAD COMPLETE] " + path);
-            } else {
-                window.addVideo(path);
-            }
-        }
-    }
-
-    // Both the JVM hook and GUI cleanup thread run this same task.
-    private static final class ShutdownTask implements Runnable {
-        private final ServerRuntime runtime;
-        private final Thread hook;
-
-        ShutdownTask(ServerRuntime runtime, Thread hook) {
-            this.runtime = runtime;
-            this.hook = hook;
-        }
-
-        @Override
-        public void run() {
-            runtime.close();
-            if (hook != null) {
-                removeHook(hook);
-            }
-        }
-    }
-
-    private static final class WindowCloseHandler implements EventHandler<WindowEvent> {
-        @Override
-        public void handle(WindowEvent event) {
-            Platform.exit();
         }
     }
 

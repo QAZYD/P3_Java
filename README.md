@@ -106,7 +106,10 @@ been visually tested. `mvn javafx:run` without `--gui` runs headless.
 lifecycle. Named classes implement the required callback methods: `UploadCallback.accept`,
 `ShutdownTask.run` and `WindowCloseHandler.handle`. Production consumer code uses no
 records, lambdas or method references. Shutdown waits are separated into `stopServer`
-and `stopExecutor` methods. The existing regression tests remain unchanged.
+and `stopExecutor` methods. The helper classes appear first as package-private classes
+in `ConsumerMain.java`; the public `ConsumerMain` class and its nested `GuiApplication`
+appear last. Everything stays in one file. Regression tests reference `Settings` and
+`ServerRuntime` directly.
 
 The fixed executor limits executing gRPC callbacks, not upload streams or pending
 videos. gRPC can interleave independent streams; Person 1 must retain state per stream.

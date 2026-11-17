@@ -20,45 +20,45 @@ class ConsumerMainTest {
     @TempDir Path directory;
 
     @Test void configuration() throws Exception {
-        var defaults = ConsumerMain.Settings.parse();
+        var defaults = Settings.parse();
         assertEquals(50051, defaults.port());
         assertEquals(4, defaults.grpcThreads());
         assertTrue(defaults.uploadDirectory().isAbsolute());
         for (String[] args : new String[][]{{"0"}, {"70000"}, {"-1"}, {"a"}, {"50051", "0"},
                 {"50051", "-1"}, {"50051", "x"}, {"1", "1", "x", "extra"}, {"1", "1", ""}, {"1", "1", "\0"}}) {
-            assertThrows(IllegalArgumentException.class, () -> ConsumerMain.Settings.parse(args));
+            assertThrows(IllegalArgumentException.class, () -> Settings.parse(args));
         }
         Path file = Files.writeString(directory.resolve("file"), "not a directory");
         assertThrows(java.io.IOException.class,
-                () -> ConsumerMain.Settings.parse("50051", "4", file.toString()).prepareDirectory());
-        var settings = ConsumerMain.Settings.parse("--gui", "12345", "2", directory.resolve("new").toString());
+                () -> Settings.parse("50051", "4", file.toString()).prepareDirectory());
+        var settings = Settings.parse("--gui", "12345", "2", directory.resolve("new").toString());
         assertTrue(settings.gui());
         settings.prepareDirectory();
         assertTrue(Files.isDirectory(settings.uploadDirectory()));
     }
 
-    private ConsumerMain.Settings settings(int port) {
+    private Settings settings(int port) {
         // Port zero is reserved for test-only ephemeral binding; CLI rejects it.
-        return new ConsumerMain.Settings(port, 4, directory, false);
+        return new Settings(port, 4, directory, false);
     }
 
     @Test void startupPortConflictAndIdempotentShutdown() throws Exception {
-        var runtime = ConsumerMain.ServerRuntime.start(settings(0), new TestService(0), 1000);
+        var runtime = ServerRuntime.start(settings(0), new TestService(0), 1000);
         int port = runtime.port();
         assertTrue(port > 0);
         try {
             assertThrows(java.io.IOException.class,
-                    () -> ConsumerMain.ServerRuntime.start(settings(port), new TestService(0), 1000));
+                    () -> ServerRuntime.start(settings(port), new TestService(0), 1000));
         } finally { runtime.close(); runtime.close(); }
         assertTrue(runtime.isTerminated());
-        try (var restarted = ConsumerMain.ServerRuntime.start(settings(port), new TestService(0), 1000)) {
+        try (var restarted = ServerRuntime.start(settings(port), new TestService(0), 1000)) {
             assertEquals(port, restarted.port());
         }
     }
 
     @Test void sixRequestsOverlapOnFourThreads() throws Exception {
         TestService service = new TestService(3000);
-        var runtime = ConsumerMain.ServerRuntime.start(settings(0), service, 1000);
+        var runtime = ServerRuntime.start(settings(0), service, 1000);
         ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", runtime.port()).usePlaintext().build();
         long start = System.nanoTime();
         try {
@@ -79,7 +79,7 @@ class ConsumerMainTest {
 
     @Test void gracefulShutdownDrainsRequestAndConcurrentCloseIsSafe() throws Exception {
         TestService service = new TestService(300);
-        var runtime = ConsumerMain.ServerRuntime.start(settings(0), service, 2000);
+        var runtime = ServerRuntime.start(settings(0), service, 2000);
         ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", runtime.port()).usePlaintext().build();
         ExecutorService closers = Executors.newFixedThreadPool(2);
         try {
@@ -101,7 +101,7 @@ class ConsumerMainTest {
 
     @Test void forcedShutdownInterruptsActiveWork() throws Exception {
         TestService service = new TestService(30000);
-        var runtime = ConsumerMain.ServerRuntime.start(settings(0), service, 100);
+        var runtime = ServerRuntime.start(settings(0), service, 100);
         ManagedChannel channel = ManagedChannelBuilder.forAddress("localhost", runtime.port()).usePlaintext().build();
         try {
             var reply = request(channel);
@@ -116,7 +116,7 @@ class ConsumerMainTest {
     }
 
     @Test void shutdownPreservesInterrupt() throws Exception {
-        var runtime = ConsumerMain.ServerRuntime.start(settings(0), new TestService(0), 1000);
+        var runtime = ServerRuntime.start(settings(0), new TestService(0), 1000);
         Thread.currentThread().interrupt();
         try { runtime.close(); assertTrue(Thread.currentThread().isInterrupted()); }
         finally { Thread.interrupted(); }
