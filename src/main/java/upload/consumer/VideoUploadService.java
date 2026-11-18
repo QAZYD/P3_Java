@@ -10,7 +10,8 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Consumer;
-
+import java.nio.file.StandardOpenOption;
+import java.nio.file.FileAlreadyExistsException;
 import com.google.protobuf.ByteString.Output;
 
 /**
@@ -38,8 +39,11 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
     public VideoUploadService(Path uploadDir, Consumer<Path> onUploadComplete) {
         this.uploadDir = uploadDir;
         this.onUploadComplete = onUploadComplete;
+
+
     }
 
+  
     @Override
     public StreamObserver<UploadChunk> upload(StreamObserver<UploadReply> responseObserver) {
 
@@ -60,8 +64,40 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                         // TODO 2: The first message. Decide where the file goes and open it for writing.
                         //         Hint: Files.newOutputStream(...) and uploadDir.resolve(...)
                         filename = Path.of(msg.getFilename()).getFileName().toString();
-                        targetPath = uploadDir.resolve(filename);
+                        if (filename.isBlank() || filename.equals(".") || filename.equals("..")){
+                            failed = true;
+                            return;
+                        }
+                        int dotIndex = filename.lastIndexOf('.');
+                        String baseName = dotIndex > 0 ? filename.substring(0, dotIndex) : filename;
+                        String extension = dotIndex > 0 ? filename.substring(dotIndex) : "";
+                        try{
+                              Files.createDirectories(uploadDir);
+                        
+                        int counter = 0;
+                        boolean created = false;
+                        while(!created){
+                            String candidateName;
+                            if (counter == 0){
+                                candidateName = filename;
+                            } else{
+                                candidateName = baseName + " (" + counter + ")" + extension;
+                            }
+                            targetPath = uploadDir.resolve(candidateName);
+                            try{
+                                out = Files.newOutputStream(targetPath, StandardOpenOption.CREATE_NEW);
+                                created = true;
+                            } catch(FileAlreadyExistsException e){
+                                counter++;
+                            } 
+                        }
+                    
+                        
+                        } catch(IOException e){
+                            //ERROR HANDLER
+                        }  
                     }
+
                     case CHUNK -> {
                         // TODO 3: Write the bytes to the file.
                         //         Hint: msg.getChunk() returns a ByteString, which has writeTo(OutputStream).
