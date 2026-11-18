@@ -31,8 +31,8 @@ import java.util.stream.Stream;
 public class ProducerMain {
 
     public static void main(String[] args) {
-        // Read p (number of producer threads) from command-line args, defaulting to 3
-        int p = 3;
+        // Read p (number of producer threads) from config
+        int p = Config.PRODUCER_THREADS;
         System.out.printf("Starting %d producer thread(s) connecting to %s:%d...%n", p, Config.HOST, Config.PORT);
 
         ManagedChannel channel = ManagedChannelBuilder.forAddress(Config.HOST, Config.PORT)
