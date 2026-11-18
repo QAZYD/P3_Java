@@ -11,6 +11,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 
+import com.google.protobuf.ByteString.Output;
+
 /**
  * Consumer side of the upload.
  *
@@ -43,9 +45,13 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
 
         // Everything inside this anonymous class belongs to ONE upload.
         return new StreamObserver<UploadChunk>() {
-
             // TODO 1: What state does a single upload need to remember between onNext calls?
             //         Declare those fields here.
+            private OutputStream out;
+            private Path targetPath;
+            private long bytesWritten = 0;
+            private boolean failed = false;
+            private String filename;
 
             @Override
             public void onNext(UploadChunk msg) {
@@ -53,6 +59,8 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     case FILENAME -> {
                         // TODO 2: The first message. Decide where the file goes and open it for writing.
                         //         Hint: Files.newOutputStream(...) and uploadDir.resolve(...)
+                        filename = Path.of(msg.getFilename()).getFileName().toString();
+                        targetPath = uploadDir.resolve(filename);
                     }
                     case CHUNK -> {
                         // TODO 3: Write the bytes to the file.
