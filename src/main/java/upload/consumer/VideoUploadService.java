@@ -1,10 +1,8 @@
 package upload.consumer;
-
 import io.grpc.stub.StreamObserver;
 import upload.grpc.UploadChunk;
 import upload.grpc.UploadReply;
 import upload.grpc.VideoUploadGrpc;
-
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
@@ -12,7 +10,8 @@ import java.nio.file.Path;
 import java.util.function.Consumer;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.FileAlreadyExistsException;
-import com.google.protobuf.ByteString.Output;
+import java.nio.file.InvalidPathException;
+
 
 /**
  * Consumer side of the upload.
@@ -63,7 +62,27 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     case FILENAME -> {
                         // TODO 2: The first message. Decide where the file goes and open it for writing.
                         //         Hint: Files.newOutputStream(...) and uploadDir.resolve(...)
-                        filename = Path.of(msg.getFilename()).getFileName().toString();
+                        if (failed || filename != null || out != null){
+                            failed = true; 
+                            cleanupUpload();
+                            return;
+                        }
+
+                        try {
+                            Path incomingPath = Path.of(msg.getFilename());
+
+                            if (incomingPath.getFileName() == null) {
+                                failed = true;
+                                return;
+                            }
+
+                            filename = incomingPath.getFileName().toString();
+
+                        } catch (InvalidPathException e) {
+                            failed = true;
+                            return;
+                        }
+
                         if (filename.isBlank() || filename.equals(".") || filename.equals("..")){
                             failed = true;
                             return;
@@ -83,9 +102,10 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                             } else{
                                 candidateName = baseName + " (" + counter + ")" + extension;
                             }
-                            targetPath = uploadDir.resolve(candidateName);
+                            Path candidatePath = uploadDir.resolve(candidateName);
                             try{
-                                out = Files.newOutputStream(targetPath, StandardOpenOption.CREATE_NEW);
+                                out = Files.newOutputStream(candidatePath, StandardOpenOption.CREATE_NEW);
+                                targetPath = candidatePath; 
                                 created = true;
                             } catch(FileAlreadyExistsException e){
                                 counter++;
@@ -94,7 +114,8 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     
                         
                         } catch(IOException e){
-                            //ERROR HANDLER
+                            failed = true;
+                             cleanupUpload();
                         }  
                     }
 
@@ -103,6 +124,7 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                         //         Hint: msg.getChunk() returns a ByteString, which has writeTo(OutputStream).
                         if (failed || out == null){
                             failed = true;
+                            cleanupUpload();
                             return;
                         }
                         try{
@@ -110,25 +132,85 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                             bytesWritten += msg.getChunk().size();
                         }catch(IOException e){
                             failed = true;
+                            cleanupUpload();
                         }
                     }
                     case DATA_NOT_SET -> {
-                        // TODO 4 (design): Is an empty message an error? What should we do?
+                        failed = true;
+                        cleanupUpload();
                     }
                 }
             }
 
             @Override
             public void onCompleted() {
+                
                 // TODO 5: The producer is done. Close the file, then reply to the producer:
                 //         responseObserver.onNext(UploadReply.newBuilder()...build());
                 //         responseObserver.onCompleted();
+                if(failed || out ==  null){
+                    failed = true;
+                    cleanupUpload();
+                    UploadReply reply = UploadReply.newBuilder()
+                        .setAccepted(false)
+                        .setMessage("upload failed")
+                        .build();
+                    responseObserver.onNext(reply);
+                    responseObserver.onCompleted();
+                    return;
+                }
+                try{
+                out.close();
+                }catch(IOException e){
+                    failed = true; 
+                    cleanupUpload();
+                     UploadReply reply = UploadReply.newBuilder()
+                        .setAccepted(false)
+                        .setMessage("upload failed")
+                        .build();
+                    responseObserver.onNext(reply);
+                    responseObserver.onCompleted();
+                    return;
+                }
+                 try {
+                    onUploadComplete.accept(targetPath);
+                } catch (RuntimeException e) {
+                    e.printStackTrace();
+                }
+                 UploadReply reply = UploadReply.newBuilder()
+                    .setAccepted(true)
+                    .setMessage("Upload Successful: " + filename)
+                    .build();
+                responseObserver.onNext(reply);
+                responseObserver.onCompleted();
             }
 
             @Override
             public void onError(Throwable t) {
                 // TODO 6 (design): The upload broke halfway. What should happen to the half-written file?
+                failed = true;
+                cleanupUpload();
             }
+
+            private void cleanupUpload() {
+                if (out != null) {
+                    try {
+                        out.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                    out = null;
+                }
+
+                if (targetPath != null) {
+                    try {
+                        Files.deleteIfExists(targetPath);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                    targetPath = null;
+                }
+        }
         };
     }
 }
