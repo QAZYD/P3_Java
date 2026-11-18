@@ -101,6 +101,16 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     case CHUNK -> {
                         // TODO 3: Write the bytes to the file.
                         //         Hint: msg.getChunk() returns a ByteString, which has writeTo(OutputStream).
+                        if (failed || out == null){
+                            failed = true;
+                            return;
+                        }
+                        try{
+                            msg.getChunk().writeTo(out);
+                            bytesWritten += msg.getChunk().size();
+                        }catch(IOException e){
+                            failed = true;
+                        }
                     }
                     case DATA_NOT_SET -> {
                         // TODO 4 (design): Is an empty message an error? What should we do?
