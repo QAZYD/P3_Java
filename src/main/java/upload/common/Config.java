@@ -25,4 +25,7 @@ public final class Config {
 
     /** Preview length in seconds. */
     public static final int PREVIEW_SECONDS = 10;
+
+    /** Number of producer threads.(p) */
+    public static final int PRODUCER_THREADS = 3;
 }
