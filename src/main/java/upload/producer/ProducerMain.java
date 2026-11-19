@@ -112,35 +112,50 @@ public class ProducerMain {
             }
         };
 
-        StreamObserver<UploadChunk> requestObserver = stub.upload(responseObserver);
+        StreamObserver<UploadChunk> requestObserver = null;
+        boolean completed = false;
 
-        try (InputStream inputStream = Files.newInputStream(file)) {
-            // 1. Send filename first via oneof data case
-            UploadChunk filenameChunk = UploadChunk.newBuilder()
-                    .setFilename(fileName)
-                    .build();
-            requestObserver.onNext(filenameChunk);
+        try {
+            requestObserver = stub.upload(responseObserver);
 
-            // 2. Stream file bytes in Config.CHUNK_SIZE chunks
-            byte[] buffer = new byte[Config.CHUNK_SIZE];
-            int bytesRead;
-            while ((bytesRead = inputStream.read(buffer)) != -1) {
-                UploadChunk chunk = UploadChunk.newBuilder()
-                        .setChunk(ByteString.copyFrom(buffer, 0, bytesRead))
+            try (InputStream inputStream = Files.newInputStream(file)) {
+                // 1. Send filename first via oneof data case
+                UploadChunk filenameChunk = UploadChunk.newBuilder()
+                        .setFilename(fileName)
                         .build();
-                requestObserver.onNext(chunk);
+                requestObserver.onNext(filenameChunk);
+
+                // 2. Stream file bytes in Config.CHUNK_SIZE chunks
+                byte[] buffer = new byte[Config.CHUNK_SIZE];
+                int bytesRead;
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    UploadChunk chunk = UploadChunk.newBuilder()
+                            .setChunk(ByteString.copyFrom(buffer, 0, bytesRead))
+                            .build();
+                    requestObserver.onNext(chunk);
+                }
             }
 
             // 3. Complete stream and wait for reply
             requestObserver.onCompleted();
+            completed = true;
 
             if (!latch.await(2, TimeUnit.MINUTES)) {
                 System.err.printf("[Producer %d] [TIMEOUT] No reply received for %s%n", producerId, fileName);
             }
 
+        } catch (InterruptedException e) {
+            System.err.printf("[Producer %d] [INTERRUPTED] Upload interrupted for %s: %s%n", producerId, fileName, e.getMessage());
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             System.err.printf("[Producer %d] [EXCEPTION] Failed uploading %s: %s%n", producerId, fileName, e.getMessage());
-            requestObserver.onError(e);
+            if (requestObserver != null && !completed) {
+                try {
+                    requestObserver.onError(e);
+                } catch (Exception ignored) {
+                    // Stream may already be terminated by server/transport
+                }
+            }
         }
     }
 }
