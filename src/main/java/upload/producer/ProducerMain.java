@@ -3,7 +3,8 @@ package upload.producer;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.stub.StreamObserver;
+import io.grpc.stub.ClientCallStreamObserver;
+import io.grpc.stub.ClientResponseObserver;
 import upload.common.Config;
 import upload.grpc.UploadChunk;
 import upload.grpc.UploadReply;
@@ -62,6 +63,11 @@ public class ProducerMain {
                     }
 
                     for (Path file : mp4Files) {
+                        // Stop early if the pool is being shut down.
+                        if (Thread.currentThread().isInterrupted()) {
+                            System.err.printf("[Producer %d] Interrupted, skipping remaining files%n", producerId);
+                            break;
+                        }
                         uploadFile(producerId, file, asyncStub);
                     }
                 } catch (Exception e) {
@@ -92,8 +98,16 @@ public class ProducerMain {
         String fileName = file.getFileName().toString();
         System.out.printf("[Producer %d] Starting upload for: %s%n", producerId, fileName);
         CountDownLatch latch = new CountDownLatch(1);
+        // Flow control: the send loop waits on this until gRPC can take more data.
+        Object readyLock = new Object();
 
-        StreamObserver<UploadReply> responseObserver = new StreamObserver<>() {
+        ClientResponseObserver<UploadChunk, UploadReply> responseObserver = new ClientResponseObserver<>() {
+            @Override
+            public void beforeStart(ClientCallStreamObserver<UploadChunk> requestStream) {
+                // gRPC calls this whenever its outgoing buffer has room again.
+                requestStream.setOnReadyHandler(() -> wake(readyLock));
+            }
+
             @Override
             public void onNext(UploadReply reply) {
                 System.out.printf("[Producer %d] [RESULT] %s -> Accepted: %b | Message: %s%n",
@@ -104,19 +118,22 @@ public class ProducerMain {
             public void onError(Throwable t) {
                 System.err.printf("[Producer %d] [ERROR] Stream failed for %s: %s%n", producerId, fileName, t.getMessage());
                 latch.countDown();
+                wake(readyLock); // let a waiting send loop see that the call ended
             }
 
             @Override
             public void onCompleted() {
                 latch.countDown();
+                wake(readyLock);
             }
         };
 
-        StreamObserver<UploadChunk> requestObserver = null;
+        ClientCallStreamObserver<UploadChunk> requestObserver = null;
         boolean completed = false;
 
         try {
-            requestObserver = stub.upload(responseObserver);
+            // The async stub returns a ClientCallStreamObserver, which exposes isReady() and cancel().
+            requestObserver = (ClientCallStreamObserver<UploadChunk>) stub.upload(responseObserver);
 
             try (InputStream inputStream = Files.newInputStream(file)) {
                 // 1. Send filename first via oneof data case
@@ -129,6 +146,10 @@ public class ProducerMain {
                 byte[] buffer = new byte[Config.CHUNK_SIZE];
                 int bytesRead;
                 while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    // Only send when gRPC can take it, so the file isn't buffered in memory.
+                    if (!waitUntilReady(requestObserver, latch, readyLock)) {
+                        return; // call already ended; onError has logged why
+                    }
                     UploadChunk chunk = UploadChunk.newBuilder()
                             .setChunk(ByteString.copyFrom(buffer, 0, bytesRead))
                             .build();
@@ -142,10 +163,17 @@ public class ProducerMain {
 
             if (!latch.await(2, TimeUnit.MINUTES)) {
                 System.err.printf("[Producer %d] [TIMEOUT] No reply received for %s%n", producerId, fileName);
+                // Close the call instead of leaving it open until the channel shuts down.
+                requestObserver.cancel("Timed out waiting for reply", null);
             }
 
         } catch (InterruptedException e) {
             System.err.printf("[Producer %d] [INTERRUPTED] Upload interrupted for %s: %s%n", producerId, fileName, e.getMessage());
+            // Close the call whether we were still sending or already waiting for the reply.
+            // cancel() is allowed after onCompleted(); onError() is not.
+            if (requestObserver != null) {
+                requestObserver.cancel("Producer interrupted", e);
+            }
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             System.err.printf("[Producer %d] [EXCEPTION] Failed uploading %s: %s%n", producerId, fileName, e.getMessage());
@@ -156,6 +184,30 @@ public class ProducerMain {
                     // Stream may already be terminated by server/transport
                 }
             }
+        }
+    }
+
+    /**
+     * Blocks until gRPC can accept another message without buffering it in memory.
+     * Returns false if the call ended while waiting (no point sending more).
+     */
+    private static boolean waitUntilReady(ClientCallStreamObserver<UploadChunk> stream,
+                                          CountDownLatch latch, Object readyLock) throws InterruptedException {
+        synchronized (readyLock) {
+            while (!stream.isReady()) {
+                if (latch.getCount() == 0) {
+                    return false;
+                }
+                // Timed wait as a safety net in case a wake-up is missed.
+                readyLock.wait(1000);
+            }
+        }
+        return latch.getCount() > 0;
+    }
+
+    private static void wake(Object readyLock) {
+        synchronized (readyLock) {
+            readyLock.notifyAll();
         }
     }
 }
