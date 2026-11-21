@@ -7,10 +7,15 @@ import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.stage.Stage;
 import upload.common.Config;
+import upload.common.UserInput;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Stream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -20,9 +25,12 @@ import java.util.function.Consumer;
 public class ConsumerMain extends Application implements Consumer<Path>, Runnable {
     private int port = Config.PORT;
     private String portSource = "default";
-    private int grpcThreads = 4;
+    private int grpcThreads = Config.GRPC_THREADS;
+    private int consumerThreads = Config.CONSUMER_THREADS; // c
+    private int queueCapacity = Config.QUEUE_CAPACITY;     // q
     private Path uploadDirectory = Config.UPLOADS_DIR.toAbsolutePath().normalize();
     private PreviewWindow window;
+    private UploadQueue queue;
     private Server server;
     private ExecutorService executor;
     private Thread shutdownHook;
@@ -31,8 +39,15 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
     // JavaFX creates this object using this constructor.
     public ConsumerMain() {}
 
-    // Read optional port, thread count, and upload directory.
-    void configure(String... args) {
+    // Read --c=N and --q=N, then optional port, gRPC thread count, and upload directory.
+    void configure(String... rawArgs) {
+        List<String> positional = new ArrayList<>();
+        for (String arg : rawArgs) {
+            if (arg.startsWith("--c=")) consumerThreads = UserInput.parsePositiveOption(arg, "Consumer threads (c)");
+            else if (arg.startsWith("--q=")) queueCapacity = UserInput.parsePositiveOption(arg, "Queue capacity (q)");
+            else positional.add(arg);
+        }
+        String[] args = positional.toArray(new String[0]);
         if (args.length > 3) throw new IllegalArgumentException("Expected at most three arguments.");
         if (args.length == 0) {
             // No port argument: CONSUMER_PORT env var > network.properties > Config.PORT
@@ -64,11 +79,27 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         try {
             configure(getParameters().getRaw().toArray(new String[0]));
             window = new PreviewWindow(stage);
-            startServer(new VideoUploadService(uploadDirectory, this));
+            startServer(createQueuedService());
         } catch (IOException | RuntimeException e) {
             System.err.println("[SERVER] Cannot start consumer: " + e.getMessage());
             Platform.exit();
         }
+    }
+
+    // Uploads are received into a staging folder next to the uploads folder (e.g. "uploads-incoming"),
+    // so the uploads folder only ever contains fully saved videos.
+    Path stagingDirectory() {
+        Path name = uploadDirectory.getFileName();
+        return name == null
+                ? uploadDirectory.resolve(".incoming")
+                : uploadDirectory.resolveSibling(name + "-incoming");
+    }
+
+    // Leaky-bucket queue (capacity q) drained by c worker threads, which save into the uploads folder.
+    synchronized VideoUploadService createQueuedService() {
+        if (queue != null) throw new IllegalStateException("Queue already created.");
+        queue = new UploadQueue(queueCapacity, consumerThreads, uploadDirectory, this);
+        return new VideoUploadService(stagingDirectory(), queue);
     }
 
     private void prepareDirectory() throws IOException {
@@ -78,6 +109,16 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         }
         Path check = Files.createTempFile(uploadDirectory, ".write-check-", ".tmp");
         Files.delete(check);
+        if (queue != null) {
+            // Leftovers in staging are unfinished uploads from a previous run that was killed.
+            Path staging = stagingDirectory();
+            Files.createDirectories(staging);
+            try (Stream<Path> leftovers = Files.list(staging)) {
+                for (Path leftover : leftovers.toList()) {
+                    Files.deleteIfExists(leftover);
+                }
+            }
+        }
     }
 
     // A test can pass a small service while Person 1's upload handler is unfinished.
@@ -88,8 +129,14 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         System.out.println("[SERVER] Port: " + port + " (from " + portSource + ")");
         System.out.println("[SERVER] gRPC executor threads: " + grpcThreads);
         System.out.println("[SERVER] Upload directory: " + uploadDirectory);
+        if (queue != null) {
+            System.out.println("[SERVER] Consumer threads (c): " + consumerThreads);
+            System.out.println("[SERVER] Queue capacity (q): " + queueCapacity
+                    + (Config.PROCESSING_DELAY_MS > 0 ? " (processing delay " + Config.PROCESSING_DELAY_MS + " ms)" : ""));
+        }
         executor = Executors.newFixedThreadPool(grpcThreads);
         try {
+            if (queue != null) queue.start();
             server = ServerBuilder.forPort(port).executor(executor).addService(service).build().start();
             shutdownHook = new Thread(this, "consumer-shutdown");
             Runtime.getRuntime().addShutdownHook(shutdownHook);
@@ -141,6 +188,8 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
                 executor.shutdownNow();
             }
         }
+        // No more uploads can arrive now; let workers finish, discard videos still waiting.
+        if (queue != null) queue.shutdown(5, TimeUnit.SECONDS);
         if (shutdownHook != null) {
             try {
                 Runtime.getRuntime().removeShutdownHook(shutdownHook);
@@ -161,23 +210,34 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
 
     // Run with the JavaFX window by default. Use --headless until Person 4 finishes it.
     public static void main(String[] args) {
+        args = withPromptedQueueSettings(args);
         if (args.length == 0 || !args[0].equals("--headless")) {
             launch(args);
             return;
         }
         ConsumerMain consumer = new ConsumerMain();
         try {
-            String[] options = java.util.Arrays.copyOfRange(args, 1, args.length);
+            String[] options = Arrays.copyOfRange(args, 1, args.length);
             consumer.configure(options);
-            consumer.startServer(new VideoUploadService(consumer.uploadDirectory, consumer));
+            consumer.startServer(consumer.createQueuedService());
             consumer.server.awaitTermination();
         } catch (IllegalArgumentException | IOException e) {
             System.err.println("[SERVER] Cannot start consumer: " + e.getMessage());
-            System.err.println("Usage: ConsumerMain [--headless] [port] [grpcThreads] [uploadDirectory]");
+            System.err.println("Usage: ConsumerMain [--headless] [--c=N] [--q=N] [port] [grpcThreads] [uploadDirectory]");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
             consumer.stopServer();
         }
+    }
+
+    // Spec: c and q are inputs from the user. Ask for any not given as --c=N / --q=N.
+    static String[] withPromptedQueueSettings(String[] args) {
+        List<String> all = new ArrayList<>(Arrays.asList(args));
+        boolean hasC = all.stream().anyMatch(a -> a.startsWith("--c="));
+        boolean hasQ = all.stream().anyMatch(a -> a.startsWith("--q="));
+        if (!hasC) all.add("--c=" + UserInput.askPositiveInt("Number of consumer threads (c)", Config.CONSUMER_THREADS));
+        if (!hasQ) all.add("--q=" + UserInput.askPositiveInt("Max queue length (q)", Config.QUEUE_CAPACITY));
+        return all.toArray(new String[0]);
     }
 }

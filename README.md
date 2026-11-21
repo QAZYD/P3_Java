@@ -1,204 +1,197 @@
 # Networked Producer–Consumer Video Upload
 
-University Java 17 project using gRPC client streaming and Protocol Buffers.
-Person 2 implements consumer server configuration, concurrency and lifecycle.
-The upload service, producer and JavaFX window currently contain teammate TODOs;
-this is a working server foundation, not yet a working media upload application.
+University Java 17 project. A **producer** uploads MP4 videos to a **consumer** over
+gRPC client streaming; the consumer saves them and shows a JavaFX window where each
+video previews for its first 10 seconds.
 
-## Current architecture and ownership
-
-```text
-ProducerMain (Person 3, TODO)
-    -> gRPC VideoUpload.Upload client stream
-    -> fixed gRPC callback executor (Person 2, implemented)
-    -> VideoUploadService (Person 1, TODO)
-    -> completion callback -> PreviewWindow.addVideo (Person 4, TODO)
-```
-
-`src/main/proto/video_upload.proto` generates `upload.grpc.VideoUploadGrpc`,
-`UploadChunk` and `UploadReply`. The contract remains unchanged: filename first,
-then 64 KB chunks, then stream completion and one reply.
-
-The assignment's bounded FIFO queue and `c` consumer workers are **not implemented**.
-The gRPC executor is separate from that future queue and does not cap open streams.
-
-## Requirements and setup
-
-Use JDK 17 and Maven (no Maven Wrapper is present). The POM compiles with
-`--release 17`; dependencies include gRPC 1.68.1, Protobuf 3.25.5 and JavaFX 21.0.5.
-Set `JAVA_HOME` to your JDK directory and add Maven's `bin` directory to `PATH`.
-On Windows this can be done in Environment Variables; reopen your terminal.
-On macOS, an installed JDK 17 can be selected with:
-
-```sh
-export JAVA_HOME=$(/usr/libexec/java_home -v 17)
-```
-
-Check the JVM Maven actually uses:
+## How it works
 
 ```text
-java -version
-mvn -version
+ProducerMain (p threads, one folder each: videos/p1, videos/p2, ...)
+    -> one gRPC VideoUpload.Upload stream per MP4:
+       filename first, then 64 KB chunks (sent only when gRPC is ready), then complete
+    -> ConsumerMain: gRPC server
+    -> VideoUploadService: receives the bytes into uploads-incoming/
+    -> UploadQueue (leaky bucket, max length q): full -> video dropped, producer told "Dropped: queue full"
+    -> c consumer worker threads: move the video into uploads/
+    -> PreviewWindow.addVideo: tile appears; hover = muted 10 s preview, click = full player
 ```
 
-Maven downloads dependencies and generates protocol classes. JavaFX native
-libraries must match the OS and the **JVM** CPU architecture. Resolve dependencies
-on each target machine; do not copy macOS native binaries onto Windows/Linux.
-GUI operation additionally requires a graphical desktop and supported media codecs.
-No Homebrew packages or unrelated system settings need to change for this work.
+1. `ConsumerMain` asks for **c** (consumer threads) and **q** (max queue length), starts the
+   gRPC server, the c workers, and the preview window.
+2. `ProducerMain` asks for **p** (producer threads) and connects; thread *i* uploads every
+   `.mp4` in `videos/p<i>`.
+3. Each file is its own stream. The producer waits for gRPC to be ready before each chunk
+   (flow control), so memory stays flat even for multi-GB files.
+4. `VideoUploadService` keeps per-stream state and writes the incoming bytes to the staging
+   folder `uploads-incoming/`. Path components in the filename are stripped. A broken or
+   rejected upload deletes its partial file.
+5. When the whole file has arrived it is offered to the queue. **Leaky bucket:** if q videos
+   are already waiting, the new one is dropped (file deleted, reply `Dropped: queue full`).
+   Otherwise the reply is `Received, queued for saving: <name>`.
+6. The c workers take videos in FIFO order and move them into `uploads/` (repeated names
+   become `name (1).mp4`, ...), then the tile is added to the window.
+7. The producer exits when its folders are done; closing the window stops the server and the
+   workers. Videos still waiting in the queue at shutdown are discarded.
+
+### Inputs (p, c, q)
+
+| Input | Asked by | Default (`Config`) | Skip the prompt with |
+|---|---|---|---|
+| p, producer threads | producer | `PRODUCER_THREADS` = 3 | `--p=N` |
+| c, consumer threads | consumer | `CONSUMER_THREADS` = 2 | `--c=N` |
+| q, max queue length | consumer | `QUEUE_CAPACITY` = 5 | `--q=N` |
+
+Press Enter at a prompt to keep the default.
+
+Saving a video is just a file move, so with the defaults the queue empties almost instantly
+and drops are rare. To **demonstrate drops**, set `Config.PROCESSING_DELAY_MS` (e.g. `3000`,
+extra time each worker spends per video), run the consumer with small values (`c=1`, `q=1`)
+and upload several videos at once.
+
+Shared constants are in `src/main/java/upload/common/Config.java`; the wire format is in
+`src/main/proto/video_upload.proto` (`UploadChunk` = filename **or** chunk, `UploadReply`).
+
+## Requirements
+
+- JDK 17 or newer and Maven (no wrapper). Check with `java -version` and `mvn -version`.
+- Dependencies (gRPC 1.68.1, Protobuf 3.25.5, JavaFX 21.0.5) download automatically.
+  JavaFX native libraries must match the OS/CPU, so build on each machine; don't copy `target/`.
+- Test videos must be **H.264 video (+ AAC audio)**. JavaFX cannot play H.265/HEVC; those
+  upload fine but show "Preview unavailable". See [test-videos/README.md](test-videos/README.md)
+  to generate synthetic H.264 clips with FFmpeg.
 
 ## Build and run
 
-The following commands work on macOS and Windows CMD/PowerShell:
+Run everything from the project root. **In PowerShell, quote every `-D...` argument**,
+otherwise PowerShell splits it at the dot.
 
-```text
-mvn clean compile
-mvn test
-mvn exec:java "-Dexec.mainClass=upload.consumer.ConsumerMain" "-Dexec.args=--headless 50051 4 uploads"
-```
-
-The consumer starts JavaFX by default. With `--headless`, defaults are port
-`50051`, four gRPC callback threads, and `uploads` under the working directory.
-
-```text
-ConsumerMain [--headless] [port] [grpcThreads] [uploadDirectory]
-```
-
-Trailing positional arguments may be omitted. Ports must be 1–65535 and thread
-count must be positive. Malformed, extra and blank directory arguments are rejected
-with a message and usage. Paths are normalized to absolute paths; missing directories
-are created. A temporary create/delete probe verifies write access. Completed videos
-are never deleted by server shutdown. Ordinary configuration errors return without
-an uncaught stack trace (currently main returns normally, not a nonzero exit code).
-For paths containing spaces, quote the directory inside Maven's argument string.
-
-Stop with Ctrl+C. For a separate Java process, useful for testing JVM signal handling:
-
-```text
-mvn dependency:build-classpath "-Dmdep.outputFile=target/runtime-classpath.txt" "-DincludeScope=runtime"
-```
-
-macOS/Linux:
-```sh
-java -cp "target/classes:$(cat target/runtime-classpath.txt)" upload.consumer.ConsumerMain --headless 50051 4 uploads
-```
-
-Windows PowerShell:
 ```powershell
-$consumerClasspath = "target/classes;" + (Get-Content target/runtime-classpath.txt -Raw).Trim()
-java -cp $consumerClasspath upload.consumer.ConsumerMain --headless 50051 4 uploads
+mvn clean compile
+mvn test                      # optional unit tests
 ```
 
-GUI lifecycle wiring is available via:
+Put MP4s in `videos\p1`, `videos\p2`, `videos\p3`.
+
+Terminal 1, consumer: answer the c and q prompts, then wait for `[SERVER] Ready to receive uploads`:
+```powershell
+mvn javafx:run
+```
+If the prompts don't appear (some launchers don't pass console input; the defaults are then used),
+give the values directly: `mvn javafx:run "-Djavafx.args=--c=2 --q=5"`.
+
+Terminal 2, producer: answer the p prompt:
+```powershell
+mvn exec:java "-Dexec.mainClass=upload.producer.ProducerMain"
+```
+Without the prompt: `mvn exec:java "-Dexec.mainClass=upload.producer.ProducerMain" "-Dexec.args=--p=3"`.
+
+Results are saved in `uploads\` (git-ignored). Uploads in progress are in `uploads-incoming\`.
+
+### Consumer options
 
 ```text
-mvn javafx:run "-Djavafx.args=50051 4 uploads"
+ConsumerMain [--headless] [--c=N] [--q=N] [port] [grpcThreads] [uploadDirectory]
 ```
 
-**PreviewWindow is still a placeholder and does not show a window.** Use headless
-mode until Person 4 completes it. GUI playback and window-close behavior have not
-been visually tested. `mvn javafx:run` starts JavaFX. For server-only testing, use the `--headless` command above.
+- `--headless` runs the server with no window (useful on a server-only VM):
+  `mvn exec:java "-Dexec.mainClass=upload.consumer.ConsumerMain" "-Dexec.args=--headless"`
+- With the GUI: `mvn javafx:run "-Djavafx.args=--c=2 --q=5 60051 4 uploads"`
+- `grpcThreads` (default `Config.GRPC_THREADS` = 4) are the threads that receive chunks; they
+  are separate from the c workers. Port defaults come from the network settings below.
+  Invalid arguments print a message and usage instead of a stack trace.
 
-## Lifecycle and concurrency
+## Network settings (same machine, VM, teammate's laptop, Docker)
 
-`ConsumerMain` follows the team's original JavaFX skeleton: it extends `Application`
-and overrides `start(Stage)` and `stop()`. Its fields hold the port, gRPC thread
-count, upload directory, server and executor. `start(Stage)` creates the window on
-the JavaFX thread and starts gRPC; `stop()` starts background cleanup. `main()`
-launches JavaFX by default and accepts `--headless` for server-only testing while
-the GUI is unfinished. A small `startServer()` helper accepts a test service, so the
-server can be tested independently of Person 1's unfinished upload service.
+The producer's target address and both sides' port are looked up in this order:
 
-The fixed executor limits executing gRPC callbacks, not upload streams or pending
-videos. gRPC can interleave independent streams; Person 1 must retain state per stream.
-There are no artificial production delays. The server stays alive in headless mode
-via `awaitTermination()`.
+1. command-line argument (producer: host as first argument; consumer: port argument)
+2. environment variable `CONSUMER_HOST` / `CONSUMER_PORT`
+3. `network.properties` in the project root (git-ignored, one per machine)
+4. `Config` defaults: `localhost`, `50051`
 
-Shutdown is synchronized and idempotent. A JVM hook or GUI close requests server
-shutdown, allows five seconds for requests, then forces cancellation and waits up to
-five more seconds. The executor gets the same graceful/forced sequence. Interrupted
-shutdown restores the caller's interrupt flag. Java cannot forcibly terminate arbitrary
-code that ignores interrupts; timeout warnings identify that condition. Startup failure
-releases the server/executor. GUI shutdown waits run on a separate cleanup thread,
-not the JavaFX Application Thread.
+Both programs print which value they used and where it came from.
 
-JavaFX constructs `PreviewWindow(Stage)` within `Application.start`. Upload completion
-calls `window.addVideo(Path)` from a gRPC worker. Person 4's documented contract requires
-`Platform.runLater()` inside that method; this placeholder does not yet update a UI.
-The close handler exits JavaFX, and `Application.stop()` initiates the same server cleanup.
+To configure a machine once, copy `network.properties.example` to `network.properties`:
 
-## Integration contracts
-
-- **Person 1:** preserve `VideoUploadService(Path, Consumer<Path>)`. Implement stream
-  validation, sanitized filenames, collision handling, writing/closing files, incomplete
-  file cleanup and final replies. Invoke the callback only for successfully completed,
-  published videos. Current placeholder streams never send replies; clients need deadlines.
-- **Person 3:** implement streaming to a configurable host/port, `p` workers with distinct
-  folders, response waiting, deadlines and network-error handling. `Config.HOST` is currently
-  localhost; VM selection needs producer configuration rather than source changes.
-- **Person 4:** preserve `PreviewWindow(Stage)` and thread-safe `addVideo(Path)`. Construct
-  and show the stage in the constructor, schedule UI updates with `Platform.runLater`, and
-  implement muted 10-second hover/full-click playback and media-error handling. Coordinate
-  any replacement close handler with ConsumerMain's JavaFX exit lifecycle.
-
-### Queue agreement needed
-
-Agree with Person 1 on a `VideoJob` holding a closed staged path and response/completion
-metadata, plus an admission method returning accepted/full/stopping. Submit after a stream
-has staged successfully but **before** sending an accepted reply. A `Consumer<Path>` alone
-cannot return queue rejection; add an agreed admission interface rather than silently
-changing this constructor or the protocol.
-
-Use a separate `ArrayBlockingQueue<VideoJob>(q)` and `c` worker threads. Admission uses
-`offer`, never `put`: full means reject the incoming job, retain older queued jobs, clean
-its staging file and reply `accepted=false, message="QUEUE_FULL"` using the existing
-reply fields after team agreement. Queue order is FIFO; parallel workers may finish out
-of order. Jobs taken by workers no longer count toward `q`. Workers publish into shared
-storage and notify the GUI. Agree whether an accepted reply means queued or fully processed,
-and how processing errors and shutdown draining/cancellation are reported.
-
-Staging before admission does not bound concurrent uploads or temporary disk usage.
-Coordinate separate limits for active streams, per-file bytes and total staging storage,
-with rejection/cleanup and deadlines. Keep these limits distinct from `q`. Add separate
-CLI parameters for `c` and `q` only when the team implements this boundary.
-
-## Tests and media fixtures
-
-`mvn test` runs `ConsumerMainTest` using a **test-only** gRPC service, real local TCP,
-and the unchanged generated upload messages. It checks invalid arguments, six
-successful concurrent requests, a measured peak of four callbacks, and repeated
-shutdown. It does not test actual uploads, queue capacity, or GUI rendering.
-
-Check listening sockets while the consumer runs:
-
-macOS:
-```sh
-lsof -nP -iTCP:50051 -sTCP:LISTEN
+```properties
+consumer.host=192.168.56.1
+consumer.port=60051
 ```
 
-Windows CMD:
-```cmd
-netstat -ano | findstr :50051
+| Setup | Producer's `consumer.host` |
+|---|---|
+| Same machine | nothing (default `localhost`) |
+| VirtualBox VM, NAT, consumer on host PC | `10.0.2.2` |
+| VirtualBox host-only network | the host's host-only adapter IP, e.g. `192.168.56.1` |
+| Teammate's laptop / bridged VM | the consumer machine's IPv4 from `ipconfig` |
+| Docker container, consumer on host | `CONSUMER_HOST=host.docker.internal` |
+
+One-off run against another machine:
+```powershell
+mvn exec:java "-Dexec.mainClass=upload.producer.ProducerMain" "-Dexec.args=192.168.1.40"
 ```
 
-See [test-videos/README.md](test-videos/README.md) for reproducible synthetic H.264/yuv420p
-3-, 10- and 25-second fixture commands and SHA-256 comparisons. FFmpeg was unavailable;
-fixtures have not been generated. MP4s are already ignored by Git.
+For two machines: both must be on the same network (campus Wi-Fi may block device-to-device
+traffic; a phone hotspot works), allow Java through the consumer's firewall on private networks,
+use the same port on both sides, and keep both copies of the code in sync (`git pull`).
+The connection is plaintext with no authentication, so use it on a private network only.
 
-## Two-VM deployment
+## Testing
 
-Run the consumer on a reachable VM and have the producer connect to that VM's IP or DNS
-name, not localhost. The server binds the configured port on available interfaces. Configure
-VM bridged/host-only networking or NAT forwarding as appropriate and permit inbound TCP
-50051 (or the chosen port) from the producer in the consumer firewall. Check connectivity
-before uploading. Use a writable storage path and enough disk space. This development
-server is plaintext without authentication; keep deployment on the intended private lab
-network. GUI mode needs a desktop; headless mode supports a server-only VM.
+`mvn test` runs `ConsumerMainTest` (argument parsing, concurrent requests, callback limit,
+repeated shutdown), `VideoUploadServiceTest` (successful upload, repeated names,
+invalid sequences, cleanup) and `UploadQueueTest` (drops when full, c workers save and
+rename duplicates, shutdown, "Dropped" reply). `PreviewWindowCheck` is a manual check with a `main` method;
+it needs a desktop and real clips and is not run by `mvn test`.
 
-Windows, JavaFX media playback, real uploads and two-VM operation remain unverified.
+End-to-end checklist:
 
-## Verification record
+- [ ] Each file prints `Accepted: true` and appears in `uploads\` and in the window.
+- [ ] The same filename from two folders is saved as `name.mp4` and `name (1).mp4`.
+- [ ] Hover preview is muted and stops at 10 seconds; click opens the full player.
+- [ ] A large file (e.g. 1 GB) uploads with the producer limited to `MAVEN_OPTS=-Xmx256m`.
+- [ ] Closing the consumer mid-upload: producer logs `Stream failed`, no partial file is left.
+- [ ] Closing the window stops the server and frees the port.
+- [ ] The prompts show the entered p, c, q in the startup log (`Consumer threads (c)`, `Queue capacity (q)`).
+- [ ] Leaky bucket: with `PROCESSING_DELAY_MS = 3000`, `c=1`, `q=1` and several videos, the consumer logs
+      `[QUEUE] Dropped ...`, the producer shows `Dropped: queue full`, and only the kept videos reach `uploads\`.
 
-Run `mvn clean test` on Java 17. The current skeleton-shaped implementation was
-compiled and tested locally; see the latest test output for the actual result.
-Real uploads, GUI playback, Windows and two-VM operation remain unverified.
+Create a 1 GB dummy file for the memory test (zeros, so it shows "Preview unavailable"):
+```powershell
+$f = [IO.File]::Create("$PWD\videos\p1\big.mp4"); $f.SetLength(1GB); $f.Close()
+```
+
+Verify an upload is byte-for-byte identical:
+```powershell
+Get-FileHash videos\p1\clip.mp4, uploads\clip.mp4 -Algorithm SHA256
+```
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `Unknown lifecycle phase ".mainClass=..."` | Quote the `-D...` argument in PowerShell. |
+| `Failed to bind to address ...:50051` | A consumer is still running (close it, or find it with `Get-NetTCPConnection -LocalPort 50051 -State Listen`), or Windows reserved the port (`netsh interface ipv4 show excludedportrange protocol=tcp`); pick another port in `network.properties`. |
+| `java.lang.Error: Unresolved compilation problem` | VS Code's compiler overwrote Maven's classes in `target/`. Run `mvn clean javafx:run`. |
+| `Folder does not exist: videos\p1` | Run from the project root; create `videos\p1..p3`. |
+| Producer can't connect from another machine | Wrong `consumer.host`, firewall, different networks, or port mismatch. Check the address/port the producer printed. |
+| "Preview unavailable" | File is not H.264/AAC (or is the dummy test file). |
+| `sun.misc.Unsafe` / `restricted method` warnings | Harmless warnings from Netty and JavaFX on newer JDKs. |
+
+## Known limits
+
+- The queue holds *finished* uploads: a video is fully received before it can be dropped,
+  so a dropped video still used network bandwidth and temporary disk space.
+- No limits on concurrent streams or file size, and no authentication or encryption.
+
+## Ownership
+
+| Part | Owner |
+|---|---|
+| `VideoUploadService` (receiving, validation, replies) | Person 1 |
+| `UploadQueue`, `UploadSink` (leaky-bucket queue, c workers) | Person 1 / Person 2 |
+| `ConsumerMain` (server, threads, lifecycle) | Person 2 |
+| `ProducerMain` (threads, streaming, flow control) | Person 3 |
+| `PreviewWindow`, `FluentIcons`, CSS (UI and playback) | Person 4 |
+| `Config`, `UserInput`, `video_upload.proto` | Shared: change only after team agreement |

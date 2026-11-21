@@ -26,3 +26,6 @@ desktop.ini
 
 # Per-machine network settings (see network.properties.example)
 network.properties
+
+# Uploads still being received by the consumer
+uploads-incoming/

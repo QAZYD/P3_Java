@@ -27,19 +27,43 @@ import java.nio.file.InvalidPathException;
  */
 public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
 
+    /** Folder incoming bytes are written to: the uploads folder (direct mode) or a staging folder (queue mode). */
     private final Path uploadDir;
 
+    /** Receives each fully uploaded, closed file. */
+    private final UploadSink sink;
+
+    /** Start of the reply message when the sink accepts the file. */
+    private final String acceptedMessage;
+
     /**
-     * SHARED CONTRACT: called with the saved file's path once an upload completes successfully.
-     * ConsumerMain passes in previewWindow::addVideo here, so this class never touches JavaFX.
+     * Direct mode (no queue): files are saved straight into uploadDir.
+     * SHARED CONTRACT: onUploadComplete is called with the saved file's path once an upload completes
+     * successfully. Used by the unit tests.
      */
-    private final Consumer<Path> onUploadComplete;
-
     public VideoUploadService(Path uploadDir, Consumer<Path> onUploadComplete) {
+        this(uploadDir, (file, name) -> {
+            try {
+                onUploadComplete.accept(file);
+            } catch (RuntimeException e) {
+                e.printStackTrace();
+            }
+            return UploadSink.Result.ACCEPTED;
+        }, "Upload Successful: ");
+    }
+
+    /**
+     * Queue mode (what the app uses): files are received into stagingDir, then handed to the
+     * leaky-bucket queue. The queue's c workers move them into the uploads folder.
+     */
+    public VideoUploadService(Path stagingDir, UploadQueue queue) {
+        this(stagingDir, queue, "Received, queued for saving: ");
+    }
+
+    private VideoUploadService(Path uploadDir, UploadSink sink, String acceptedMessage) {
         this.uploadDir = uploadDir;
-        this.onUploadComplete = onUploadComplete;
-
-
+        this.sink = sink;
+        this.acceptedMessage = acceptedMessage;
     }
 
   
@@ -173,15 +197,26 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     responseObserver.onCompleted();
                     return;
                 }
-                 try {
-                    onUploadComplete.accept(targetPath);
-                } catch (RuntimeException e) {
-                    e.printStackTrace();
+                // The whole file has arrived: hand it to the sink (direct save, or the leaky-bucket queue).
+                UploadSink.Result result = sink.submit(targetPath, filename);
+                UploadReply reply;
+                if (result == UploadSink.Result.ACCEPTED) {
+                    // The sink owns the file now; don't delete it.
+                    reply = UploadReply.newBuilder()
+                        .setAccepted(true)
+                        .setMessage(acceptedMessage + filename)
+                        .build();
+                } else {
+                    // Leaky bucket: no room (or shutting down), so the video is dropped and its file deleted.
+                    String reason = result == UploadSink.Result.QUEUE_FULL
+                        ? "queue full"
+                        : "consumer is shutting down";
+                    reject(reason);
+                    reply = UploadReply.newBuilder()
+                        .setAccepted(false)
+                        .setMessage("Dropped: " + reason + " (" + filename + ")")
+                        .build();
                 }
-                 UploadReply reply = UploadReply.newBuilder()
-                    .setAccepted(true)
-                    .setMessage("Upload Successful: " + filename)
-                    .build();
                 responseObserver.onNext(reply);
                 responseObserver.onCompleted();
             }

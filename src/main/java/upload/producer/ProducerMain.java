@@ -6,6 +6,7 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.ClientResponseObserver;
 import upload.common.Config;
+import upload.common.UserInput;
 import upload.grpc.UploadChunk;
 import upload.grpc.UploadReply;
 import upload.grpc.VideoUploadGrpc;
@@ -13,6 +14,7 @@ import upload.grpc.VideoUploadGrpc;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.stream.Stream;
@@ -27,7 +29,8 @@ import java.util.stream.Stream;
  *   4. call onCompleted() and wait for the UploadReply
  *
  * Reads MP4s from Config.VIDEOS_DIR.
- * Run with: mvn exec:java -Dexec.mainClass=upload.producer.ProducerMain
+ * Run with: mvn exec:java -Dexec.mainClass=upload.producer.ProducerMain   (asks for p; Enter = default)
+ * Skip the prompt: "-Dexec.args=--p=3"  (can be combined with a host: "-Dexec.args=--p=3 192.168.1.40")
  * Another machine (PowerShell needs the quotes):
  *   mvn exec:java "-Dexec.mainClass=upload.producer.ProducerMain" "-Dexec.args=192.168.1.40"
  * or set CONSUMER_HOST, or put consumer.host=... in network.properties.
@@ -35,11 +38,25 @@ import java.util.stream.Stream;
 public class ProducerMain {
 
     public static void main(String[] args) {
-        // Read p (number of producer threads) from config
-        int p = Config.PRODUCER_THREADS;
+        // Spec: p (number of producer threads) is an input from the user.
+        // --p=N on the command line skips the prompt; other arguments are positional (host).
+        List<String> positional = new ArrayList<>();
+        Integer pOption = null;
+        try {
+            for (String arg : args) {
+                if (arg.startsWith("--p=")) pOption = UserInput.parsePositiveOption(arg, "Producer threads (p)");
+                else positional.add(arg);
+            }
+        } catch (IllegalArgumentException e) {
+            System.err.println("[CONFIG] " + e.getMessage());
+            return;
+        }
+        int p = pOption != null
+                ? pOption
+                : UserInput.askPositiveInt("Number of producer threads (p)", Config.PRODUCER_THREADS);
 
         // Consumer address: command-line arg > CONSUMER_HOST/CONSUMER_PORT > network.properties > Config defaults
-        Config.Setting host = Config.consumerHost(args);
+        Config.Setting host = Config.consumerHost(positional.toArray(new String[0]));
         Config.Setting portSetting = Config.consumerPort();
         int port;
         try {

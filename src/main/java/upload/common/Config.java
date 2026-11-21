@@ -31,8 +31,26 @@ public final class Config {
     /** Preview length in seconds. */
     public static final int PREVIEW_SECONDS = 10;
 
-    /** Number of producer threads.(p) */
+    // ---- Spec inputs p, c, q. These are the DEFAULTS offered when the programs prompt the user. ----
+
+    /** p: number of producer threads; thread i reads videos/p<i>. Prompted by ProducerMain. */
     public static final int PRODUCER_THREADS = 3;
+
+    /** c: number of consumer worker threads that take videos off the queue and save them. Prompted by ConsumerMain. */
+    public static final int CONSUMER_THREADS = 2;
+
+    /** q: max queue length (leaky bucket). Finished uploads beyond this are dropped. Prompted by ConsumerMain. */
+    public static final int QUEUE_CAPACITY = 5;
+
+    /** Threads that run gRPC callbacks (receiving chunks). Separate from c. ConsumerMain's 2nd argument overrides it. */
+    public static final int GRPC_THREADS = 4;
+
+    /**
+     * Demo aid: extra time (ms) each consumer worker spends per video before saving it.
+     * 0 = save immediately. Saving is just a file move, so with 0 the queue empties almost instantly
+     * and drops are rare; set e.g. 3000 to watch the queue fill and videos get dropped.
+     */
+    public static final long PROCESSING_DELAY_MS = 0;
 
     // ---------------------------------------------------------------------------------------
     // Network settings that differ per setup (same machine, VM, teammate's laptop, Docker).
