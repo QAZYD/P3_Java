@@ -28,12 +28,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
-/**
- * Standalone GUI checks using real JavaFX media, requiring a desktop session.
- * Pass a playable clip longer than 12 seconds, a clip shorter than 10 seconds,
- * and a corrupt media file. Prefix the paths with --show to open a manual gallery.
- * This entry point can run with the project's existing JavaFX dependencies.
- */
+
 public final class PreviewWindowCheck {
     private static Stage stage;
     private static PreviewWindow window;
@@ -67,7 +62,6 @@ public final class PreviewWindowCheck {
 
         try {
             started.get(10, TimeUnit.SECONDS);
-            // main is deliberately outside the JavaFX thread, like the upload callback.
             window.addVideo(longClip);
             window.addVideo(shortClip);
             window.addVideo(corruptClip);
@@ -279,8 +273,6 @@ public final class PreviewWindowCheck {
     private static CompletableFuture<Void> observeDisposal(MediaPlayer player) throws Exception {
         CompletableFuture<Void> disposed = new CompletableFuture<>();
         fx(() -> {
-            // Native events already queued in JavaFX 21 may update status again after dispose().
-            // Observe the disposal event itself instead of sampling a later status value.
             player.statusProperty().addListener((observable, previous, status) -> {
                 if (status == MediaPlayer.Status.DISPOSED) {
                     disposed.complete(null);

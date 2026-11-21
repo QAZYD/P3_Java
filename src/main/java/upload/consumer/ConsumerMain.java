@@ -21,13 +21,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/** Person 2: create the window and server, then stop both when the app closes. */
 public class ConsumerMain extends Application implements Consumer<Path>, Runnable {
     private int port = Config.PORT;
     private String portSource = "default";
     private int grpcThreads = Config.GRPC_THREADS;
-    private int consumerThreads = Config.CONSUMER_THREADS; // c
-    private int queueCapacity = Config.QUEUE_CAPACITY;     // q
+    private int consumerThreads = Config.CONSUMER_THREADS;
+    private int queueCapacity = Config.QUEUE_CAPACITY;     
     private Path uploadDirectory = Config.UPLOADS_DIR.toAbsolutePath().normalize();
     private PreviewWindow window;
     private UploadQueue queue;
@@ -36,10 +35,8 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
     private Thread shutdownHook;
     private boolean stopped;
 
-    // JavaFX creates this object using this constructor.
     public ConsumerMain() {}
 
-    // Read --c=N and --q=N, then optional port, gRPC thread count, and upload directory.
     void configure(String... rawArgs) {
         List<String> positional = new ArrayList<>();
         for (String arg : rawArgs) {
@@ -50,7 +47,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         String[] args = positional.toArray(new String[0]);
         if (args.length > 3) throw new IllegalArgumentException("Expected at most three arguments.");
         if (args.length == 0) {
-            // No port argument: CONSUMER_PORT env var > network.properties > Config.PORT
             Config.Setting setting = Config.consumerPort();
             port = setting.asPort();
             portSource = setting.source();
@@ -71,9 +67,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         }
     }
 
-    // 1. JavaFX calls start(Stage). Create Person 4's window on the JavaFX thread.
-    // 2. Give Person 1's upload service this object's accept(Path) callback.
-    // 3. Start gRPC with a fixed executor.
     @Override
     public void start(Stage stage) {
         try {
@@ -86,8 +79,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         }
     }
 
-    // Uploads are received into a staging folder next to the uploads folder (e.g. "uploads-incoming"),
-    // so the uploads folder only ever contains fully saved videos.
     Path stagingDirectory() {
         Path name = uploadDirectory.getFileName();
         return name == null
@@ -95,7 +86,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
                 : uploadDirectory.resolveSibling(name + "-incoming");
     }
 
-    // Leaky-bucket queue (capacity q) drained by c worker threads, which save into the uploads folder.
     synchronized VideoUploadService createQueuedService() {
         if (queue != null) throw new IllegalStateException("Queue already created.");
         queue = new UploadQueue(queueCapacity, consumerThreads, uploadDirectory, this);
@@ -110,7 +100,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         Path check = Files.createTempFile(uploadDirectory, ".write-check-", ".tmp");
         Files.delete(check);
         if (queue != null) {
-            // Leftovers in staging are unfinished uploads from a previous run that was killed.
             Path staging = stagingDirectory();
             Files.createDirectories(staging);
             try (Stream<Path> leftovers = Files.list(staging)) {
@@ -121,7 +110,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         }
     }
 
-    // A test can pass a small service while Person 1's upload handler is unfinished.
     synchronized void startServer(BindableService service) throws IOException {
         if (server != null || stopped) throw new IllegalStateException("Server already started or stopped.");
         prepareDirectory();
@@ -147,13 +135,11 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         }
     }
 
-    // 4. JavaFX calls stop() when the window closes. Cleanup may wait, so use a thread.
     @Override
     public void stop() {
         new Thread(this, "consumer-window-shutdown").start();
     }
 
-    // Runnable lets the window-close thread and JVM shutdown hook share cleanup.
     @Override
     public void run() {
         stopServer();
@@ -188,27 +174,23 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
                 executor.shutdownNow();
             }
         }
-        // No more uploads can arrive now; let workers finish, discard videos still waiting.
         if (queue != null) queue.shutdown(5, TimeUnit.SECONDS);
         if (shutdownHook != null) {
             try {
                 Runtime.getRuntime().removeShutdownHook(shutdownHook);
             } catch (IllegalStateException ignored) {
-                // JVM shutdown has already begun.
             }
         }
         if (interrupted) Thread.currentThread().interrupt();
         System.out.println("[SERVER] Shutdown complete");
     }
 
-    // Person 1 calls accept() after a video is complete.
     @Override
     public void accept(Path file) {
         if (window == null) System.out.println("[UPLOAD COMPLETE] " + file);
         else window.addVideo(file);
     }
 
-    // Run with the JavaFX window by default. Use --headless until Person 4 finishes it.
     public static void main(String[] args) {
         args = withPromptedQueueSettings(args);
         if (args.length == 0 || !args[0].equals("--headless")) {
@@ -231,7 +213,6 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         }
     }
 
-    // Spec: c and q are inputs from the user. Ask for any not given as --c=N / --q=N.
     static String[] withPromptedQueueSettings(String[] args) {
         List<String> all = new ArrayList<>(Arrays.asList(args));
         boolean hasC = all.stream().anyMatch(a -> a.startsWith("--c="));

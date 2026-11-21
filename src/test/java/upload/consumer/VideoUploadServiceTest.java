@@ -48,7 +48,6 @@ public class VideoUploadServiceTest {
     @Test
     void successfulUpload() throws Exception {
 
-        // Arrange
         VideoUploadService service = new VideoUploadService(
             uploadDir,
             path -> {}
@@ -58,7 +57,6 @@ public class VideoUploadServiceTest {
 
         StreamObserver<UploadChunk> request = service.upload(response);
 
-        // Act
         request.onNext(
             UploadChunk.newBuilder()
                 .setFilename("test.mp4")
@@ -75,7 +73,6 @@ public class VideoUploadServiceTest {
 
         request.onCompleted();
 
-        // Assert
         assertTrue(response.completed);
         assertNotNull(response.reply);
         assertTrue(response.reply.getAccepted());
@@ -89,7 +86,6 @@ public class VideoUploadServiceTest {
     @Test
     void duplicateFilenameUpload() throws Exception {
 
-        // Arrange
         VideoUploadService service = new VideoUploadService(
             uploadDir,
             path -> {}
@@ -104,7 +100,6 @@ public class VideoUploadServiceTest {
         StreamObserver<UploadChunk> firstRequest = service.upload(firstResponse);
         StreamObserver<UploadChunk> secondRequest = service.upload(secondResponse);
 
-        // Act: First upload
         firstRequest.onNext(
             UploadChunk.newBuilder()
                 .setFilename("test.mp4")
@@ -119,7 +114,6 @@ public class VideoUploadServiceTest {
 
         firstRequest.onCompleted();
 
-        // Act: Second upload with the same filename
         secondRequest.onNext(
             UploadChunk.newBuilder()
                 .setFilename("test.mp4")
@@ -134,7 +128,6 @@ public class VideoUploadServiceTest {
 
         secondRequest.onCompleted();
 
-        // Assert
         assertTrue(firstResponse.completed);
         assertTrue(secondResponse.completed);
 
@@ -157,7 +150,6 @@ public class VideoUploadServiceTest {
     @Test
     void chunkBeforeFilename() throws Exception {
 
-        // Arrange
         VideoUploadService service = new VideoUploadService(
             uploadDir,
             path -> {}
@@ -168,7 +160,6 @@ public class VideoUploadServiceTest {
 
         byte[] testData = "Invalid upload".getBytes(StandardCharsets.UTF_8);
 
-        // Act: Send a chunk without sending a filename first
         request.onNext(
             UploadChunk.newBuilder()
                 .setChunk(ByteString.copyFrom(testData))
@@ -177,7 +168,6 @@ public class VideoUploadServiceTest {
 
         request.onCompleted();
 
-        // Assert
         assertTrue(response.completed);
         assertNotNull(response.reply);
         assertTrue(!response.reply.getAccepted());
@@ -191,7 +181,6 @@ public class VideoUploadServiceTest {
 @Test
 void interruptedUpload() throws Exception {
 
-    // Arrange
     VideoUploadService service = new VideoUploadService(
         uploadDir,
         path -> {}
@@ -200,7 +189,6 @@ void interruptedUpload() throws Exception {
     TestResponseObserver response = new TestResponseObserver();
     StreamObserver<UploadChunk> request = service.upload(response);
 
-    // Act: Start an upload and write some data
     request.onNext(
         UploadChunk.newBuilder()
             .setFilename("interrupted.mp4")
@@ -215,10 +203,8 @@ void interruptedUpload() throws Exception {
             .build()
     );
 
-    // Simulate the producer's connection failing
     request.onError(new RuntimeException("Connection interrupted"));
 
-    // Assert: The partially uploaded file should be deleted
     Path interruptedFile = uploadDir.resolve("interrupted.mp4");
 
     assertTrue(Files.notExists(interruptedFile));
@@ -230,7 +216,6 @@ void interruptedUpload() throws Exception {
 @Test
 void invalidFilename() throws Exception {
 
-    // Arrange
     VideoUploadService service = new VideoUploadService(
         uploadDir,
         path -> {}
@@ -239,7 +224,6 @@ void invalidFilename() throws Exception {
     TestResponseObserver response = new TestResponseObserver();
     StreamObserver<UploadChunk> request = service.upload(response);
 
-    // Act: Send an empty filename
     request.onNext(
         UploadChunk.newBuilder()
             .setFilename("")
@@ -248,7 +232,6 @@ void invalidFilename() throws Exception {
 
     request.onCompleted();
 
-    // Assert
     assertTrue(response.completed);
     assertNotNull(response.reply);
     assertTrue(!response.reply.getAccepted());
@@ -262,7 +245,6 @@ void invalidFilename() throws Exception {
 @Test
 void emptyUpload() throws Exception {
 
-    // Arrange
     VideoUploadService service = new VideoUploadService(
         uploadDir,
         path -> {}
@@ -271,10 +253,8 @@ void emptyUpload() throws Exception {
     TestResponseObserver response = new TestResponseObserver();
     StreamObserver<UploadChunk> request = service.upload(response);
 
-    // Act: Complete without sending any messages
     request.onCompleted();
 
-    // Assert
     assertTrue(response.completed);
     assertNotNull(response.reply);
     assertTrue(!response.reply.getAccepted());
@@ -288,7 +268,6 @@ void emptyUpload() throws Exception {
 @Test
 void repeatedFilenameMessage() throws Exception {
 
-    // Arrange
     VideoUploadService service = new VideoUploadService(
         uploadDir,
         path -> {}
@@ -297,7 +276,6 @@ void repeatedFilenameMessage() throws Exception {
     TestResponseObserver response = new TestResponseObserver();
     StreamObserver<UploadChunk> request = service.upload(response);
 
-    // Act: Send the first filename and some data
     request.onNext(
         UploadChunk.newBuilder()
             .setFilename("first.mp4")
@@ -312,7 +290,6 @@ void repeatedFilenameMessage() throws Exception {
             .build()
     );
 
-    // Send another filename during the same upload
     request.onNext(
         UploadChunk.newBuilder()
             .setFilename("second.mp4")
@@ -321,7 +298,6 @@ void repeatedFilenameMessage() throws Exception {
 
     request.onCompleted();
 
-    // Assert
     assertTrue(response.completed);
     assertNotNull(response.reply);
     assertTrue(!response.reply.getAccepted());
@@ -334,7 +310,6 @@ void repeatedFilenameMessage() throws Exception {
 @Test
 void filenameSanitization() throws Exception {
 
-    // Arrange
     VideoUploadService service = new VideoUploadService(
         uploadDir,
         path -> {}
@@ -345,7 +320,6 @@ void filenameSanitization() throws Exception {
 
     byte[] testData = "Sanitized video".getBytes(StandardCharsets.UTF_8);
 
-    // Act
     request.onNext(
         UploadChunk.newBuilder()
             .setFilename("../sanitized.mp4")
@@ -360,7 +334,6 @@ void filenameSanitization() throws Exception {
 
     request.onCompleted();
 
-    // Assert
     assertTrue(response.completed);
     assertNotNull(response.reply);
     assertTrue(response.reply.getAccepted());

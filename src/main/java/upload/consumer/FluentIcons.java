@@ -18,7 +18,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Loads bundled Microsoft Fluent UI System Icons as small JavaFX vector nodes. */
 final class FluentIcons {
     private static final double ICON_SIZE = 20;
     private static final double SOURCE_SIZE = 24;

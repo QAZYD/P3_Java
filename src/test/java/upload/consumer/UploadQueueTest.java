@@ -20,7 +20,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Leaky-bucket queue: capacity q, c workers, drops when full. */
 class UploadQueueTest {
 
     @TempDir
@@ -36,7 +35,6 @@ class UploadQueueTest {
         Path uploads = root.resolve("uploads");
         CountDownLatch workerBusy = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        // The single worker blocks after saving its first video, so the queue can fill up.
         UploadQueue queue = new UploadQueue(1, 1, uploads, saved -> {
             workerBusy.countDown();
             try {
@@ -48,9 +46,9 @@ class UploadQueueTest {
         queue.start();
         try {
             assertEquals(UploadSink.Result.ACCEPTED, queue.submit(staged("a.mp4", "a"), "a.mp4"));
-            assertTrue(workerBusy.await(10, TimeUnit.SECONDS));                // worker is busy with a
-            assertEquals(UploadSink.Result.ACCEPTED, queue.submit(staged("b.mp4", "b"), "b.mp4")); // fills q = 1
-            assertEquals(UploadSink.Result.QUEUE_FULL, queue.submit(staged("c.mp4", "c"), "c.mp4")); // dropped
+            assertTrue(workerBusy.await(10, TimeUnit.SECONDS));                
+            assertEquals(UploadSink.Result.ACCEPTED, queue.submit(staged("b.mp4", "b"), "b.mp4")); 
+            assertEquals(UploadSink.Result.QUEUE_FULL, queue.submit(staged("c.mp4", "c"), "c.mp4")); 
         } finally {
             release.countDown();
         }
@@ -95,7 +93,6 @@ class UploadQueueTest {
     void serviceRepliesDroppedAndDeletesFileWhenQueueIsFull() throws Exception {
         Path uploads = root.resolve("uploads");
         Path staging = Files.createDirectories(root.resolve("incoming"));
-        // Worker count 1 but not started: nothing drains the queue, so capacity 1 fills after one upload.
         UploadQueue queue = new UploadQueue(1, 1, uploads, saved -> {});
         VideoUploadService service = new VideoUploadService(staging, queue);
 

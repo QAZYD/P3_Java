@@ -13,34 +13,14 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.InvalidPathException;
 
 
-/**
- * Consumer side of the upload.
- *
- * gRPC calls upload() ONCE per incoming upload (i.e. once per producer stream).
- * We return an object (a StreamObserver) that gRPC will then feed messages into:
- *
- *     onNext(chunk)   -> called many times: first the filename, then the byte chunks
- *     onCompleted()   -> called once if the producer finished normally
- *     onError(t)      -> called once if something went wrong (e.g. producer disconnected)
- *
- * Exactly ONE of onCompleted / onError happens at the end, never both.
- */
 public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
 
-    /** Folder incoming bytes are written to: the uploads folder (direct mode) or a staging folder (queue mode). */
     private final Path uploadDir;
 
-    /** Receives each fully uploaded, closed file. */
     private final UploadSink sink;
 
-    /** Start of the reply message when the sink accepts the file. */
     private final String acceptedMessage;
 
-    /**
-     * Direct mode (no queue): files are saved straight into uploadDir.
-     * SHARED CONTRACT: onUploadComplete is called with the saved file's path once an upload completes
-     * successfully. Used by the unit tests.
-     */
     public VideoUploadService(Path uploadDir, Consumer<Path> onUploadComplete) {
         this(uploadDir, (file, name) -> {
             try {
@@ -52,10 +32,6 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
         }, "Upload Successful: ");
     }
 
-    /**
-     * Queue mode (what the app uses): files are received into stagingDir, then handed to the
-     * leaky-bucket queue. The queue's c workers move them into the uploads folder.
-     */
     public VideoUploadService(Path stagingDir, UploadQueue queue) {
         this(stagingDir, queue, "Received, queued for saving: ");
     }
@@ -70,17 +46,13 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
     @Override
     public StreamObserver<UploadChunk> upload(StreamObserver<UploadReply> responseObserver) {
 
-        // Everything inside this anonymous class belongs to ONE upload.
         return new StreamObserver<UploadChunk>() {
-            // TODO 1: What state does a single upload need to remember between onNext calls?
-            //         Declare those fields here.
             private OutputStream out;
             private Path targetPath;
             private boolean failed = false;
-            private String failureReason; // first reason this upload was rejected, sent back to the producer
+            private String failureReason; 
             private String filename;
 
-            /** Marks the upload as failed (keeping the first reason) and deletes any partial file. */
             private void reject(String reason) {
                 if (failureReason == null) {
                     failureReason = reason;
@@ -93,8 +65,6 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
             public void onNext(UploadChunk msg) {
                 switch (msg.getDataCase()) {
                     case FILENAME -> {
-                        // TODO 2: The first message. Decide where the file goes and open it for writing.
-                        //         Hint: Files.newOutputStream(...) and uploadDir.resolve(...)
                         if (failed || filename != null || out != null){
                             reject("filename sent more than once");
                             return;
@@ -151,8 +121,6 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     }
 
                     case CHUNK -> {
-                        // TODO 3: Write the bytes to the file.
-                        //         Hint: msg.getChunk() returns a ByteString, which has writeTo(OutputStream).
                         if (failed || out == null){
                             reject("file data received before the filename");
                             return;
@@ -172,9 +140,6 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
             @Override
             public void onCompleted() {
                 
-                // TODO 5: The producer is done. Close the file, then reply to the producer:
-                //         responseObserver.onNext(UploadReply.newBuilder()...build());
-                //         responseObserver.onCompleted();
                 if(failed || out ==  null){
                     reject("no filename was sent");
                     UploadReply reply = UploadReply.newBuilder()
@@ -197,17 +162,14 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     responseObserver.onCompleted();
                     return;
                 }
-                // The whole file has arrived: hand it to the sink (direct save, or the leaky-bucket queue).
                 UploadSink.Result result = sink.submit(targetPath, filename);
                 UploadReply reply;
                 if (result == UploadSink.Result.ACCEPTED) {
-                    // The sink owns the file now; don't delete it.
                     reply = UploadReply.newBuilder()
                         .setAccepted(true)
                         .setMessage(acceptedMessage + filename)
                         .build();
                 } else {
-                    // Leaky bucket: no room (or shutting down), so the video is dropped and its file deleted.
                     String reason = result == UploadSink.Result.QUEUE_FULL
                         ? "queue full"
                         : "consumer is shutting down";
@@ -223,7 +185,6 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
 
             @Override
             public void onError(Throwable t) {
-                // TODO 6 (design): The upload broke halfway. What should happen to the half-written file?
                 failed = true;
                 cleanupUpload();
             }

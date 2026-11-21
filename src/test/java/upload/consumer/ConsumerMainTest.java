@@ -31,9 +31,7 @@ class ConsumerMainTest {
 
     @Test void startsAndStopsWithFourConcurrentCallbacks() throws Exception {
         ConsumerMain consumer = new ConsumerMain();
-        // CLI rejects port 0; the test uses it to request an available local port.
         TestService service = new TestService();
-        // Bind to an available port while still checking the four-thread executor.
         java.net.ServerSocket reservation = new java.net.ServerSocket(0);
         int port = reservation.getLocalPort();
         reservation.close();

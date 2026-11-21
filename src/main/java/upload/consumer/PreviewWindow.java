@@ -44,14 +44,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * OWNER: Person 4
- *
- * SHARED CONTRACT:
- *   - Created by ConsumerMain inside JavaFX's start(Stage), so the constructor runs on the JavaFX thread.
- *   - addVideo(Path) may be called from ANY thread (gRPC worker threads), so it must
- *     hand its UI work to the JavaFX thread with Platform.runLater(...).
- */
+
 public class PreviewWindow {
 
     private static final PseudoClass PREVIEWING = PseudoClass.getPseudoClass("previewing");
@@ -80,8 +73,6 @@ public class PreviewWindow {
                 return thread;
             }, new ThreadPoolExecutor.DiscardOldestPolicy());
 
-    // The gallery and attached players belong to the JavaFX thread. Pending construction
-    // crosses from the loader through Playback.pendingPlayer's atomic ownership handoff.
     private Playback active;
     private volatile boolean closed;
     private double tileWidth = 276;
@@ -159,8 +150,6 @@ public class PreviewWindow {
         stage.fullScreenProperty().addListener((observable, previous, maximized) ->
                 setIcon(fullScreen, maximized ? "minimize" : "maximize",
                         maximized ? "Exit full screen" : "Full screen"));
-        // addEventHandler (not setOnHidden) so this doesn't replace any other window handlers.
-        // Stops media here; ConsumerMain shuts the server down in Application.stop().
         stage.addEventHandler(WindowEvent.WINDOW_HIDDEN, event -> {
             closed = true;
             stopPlayback();
@@ -169,11 +158,6 @@ public class PreviewWindow {
         stage.show();
     }
 
-    /**
-     * Adds a completed local file. May be called from any thread after JavaFX starts.
-     * Only called after an upload has fully finished, so the file is complete.
-     * Duplicate paths and notifications after window closure are ignored.
-     */
     public void addVideo(Path file) {
         Path path = Objects.requireNonNull(file, "file").toAbsolutePath().normalize();
         if (path.getFileName() == null) {
@@ -322,8 +306,6 @@ public class PreviewWindow {
             }
             Platform.runLater(() -> attachPlayer(session));
         } catch (RuntimeException error) {
-            // Catch every runtime failure (MediaException, UnsupportedOperationException, ...)
-            // so the tile shows "Preview unavailable" instead of loading forever.
             disposePending(session);
             if (!session.cancelled && !closed) {
                 Platform.runLater(() -> playbackFailed(session, error));
@@ -391,7 +373,6 @@ public class PreviewWindow {
     }
 
     private void ready(Playback session) {
-        // A prior hover may finish loading after the pointer has left or another clip has opened.
         if (active != session || closed || session.ready) {
             return;
         }
@@ -514,10 +495,8 @@ public class PreviewWindow {
         double contentWidth = Math.max(260, availableWidth - tiles.getPadding().getLeft()
                 - tiles.getPadding().getRight());
         int columns = Math.max(1, Math.min(3, (int) ((contentWidth + tiles.getHgap()) / 280)));
-        // Leave one pixel for snapped control sizes so the last card stays on the row.
         tileWidth = Math.floor((contentWidth - (columns - 1) * tiles.getHgap()) / columns) - 1;
         if (columns == 1) {
-            // Keep a complete card visible in short windows, including its filename.
             double heightLimitedWidth = Math.max(260, (availableHeight - 80) * 16 / 9);
             tileWidth = Math.min(tileWidth, heightLimitedWidth);
         }
@@ -654,7 +633,6 @@ public class PreviewWindow {
     }
 
     private static final class Playback {
-        // The loader publishes here until the JavaFX thread claims or cancels the player.
         private final AtomicReference<MediaPlayer> pendingPlayer = new AtomicReference<>();
         private volatile boolean cancelled;
         private MediaPlayer player;
