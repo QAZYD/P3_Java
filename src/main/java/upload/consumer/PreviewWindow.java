@@ -26,7 +26,6 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.media.Media;
-import javafx.scene.media.MediaException;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
 import javafx.scene.shape.Rectangle;
@@ -160,7 +159,8 @@ public class PreviewWindow {
         stage.fullScreenProperty().addListener((observable, previous, maximized) ->
                 setIcon(fullScreen, maximized ? "minimize" : "maximize",
                         maximized ? "Exit full screen" : "Full screen"));
-        // An additional handler preserves ConsumerMain's own server-shutdown handlers.
+        // addEventHandler (not setOnHidden) so this doesn't replace any other window handlers.
+        // Stops media here; ConsumerMain shuts the server down in Application.stop().
         stage.addEventHandler(WindowEvent.WINDOW_HIDDEN, event -> {
             closed = true;
             stopPlayback();
@@ -171,15 +171,13 @@ public class PreviewWindow {
 
     /**
      * Adds a completed local file. May be called from any thread after JavaFX starts.
-     * Duplicate paths, partial files, and notifications after window closure are ignored.
+     * Only called after an upload has fully finished, so the file is complete.
+     * Duplicate paths and notifications after window closure are ignored.
      */
     public void addVideo(Path file) {
         Path path = Objects.requireNonNull(file, "file").toAbsolutePath().normalize();
         if (path.getFileName() == null) {
             throw new IllegalArgumentException("Expected a video file path");
-        }
-        if (path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".part")) {
-            return;
         }
         if (closed) {
             return;
@@ -323,7 +321,9 @@ public class PreviewWindow {
                 return;
             }
             Platform.runLater(() -> attachPlayer(session));
-        } catch (MediaException | IllegalArgumentException error) {
+        } catch (RuntimeException error) {
+            // Catch every runtime failure (MediaException, UnsupportedOperationException, ...)
+            // so the tile shows "Preview unavailable" instead of loading forever.
             disposePending(session);
             if (!session.cancelled && !closed) {
                 Platform.runLater(() -> playbackFailed(session, error));

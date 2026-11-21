@@ -19,6 +19,7 @@ import java.util.function.Consumer;
 /** Person 2: create the window and server, then stop both when the app closes. */
 public class ConsumerMain extends Application implements Consumer<Path>, Runnable {
     private int port = Config.PORT;
+    private String portSource = "default";
     private int grpcThreads = 4;
     private Path uploadDirectory = Config.UPLOADS_DIR.toAbsolutePath().normalize();
     private PreviewWindow window;
@@ -33,13 +34,21 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
     // Read optional port, thread count, and upload directory.
     void configure(String... args) {
         if (args.length > 3) throw new IllegalArgumentException("Expected at most three arguments.");
+        if (args.length == 0) {
+            // No port argument: CONSUMER_PORT env var > network.properties > Config.PORT
+            Config.Setting setting = Config.consumerPort();
+            port = setting.asPort();
+            portSource = setting.source();
+        } else {
+            portSource = "command line";
+        }
         try {
             if (args.length > 0) port = Integer.parseInt(args[0]);
             if (args.length > 1) grpcThreads = Integer.parseInt(args[1]);
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("Port and thread count must be integers.");
         }
-        if (port < 1 || port > 65535) throw new IllegalArgumentException("Port must be 1–65535.");
+        if (port < 1 || port > 65535) throw new IllegalArgumentException("Port must be 1-65535.");
         if (grpcThreads < 1) throw new IllegalArgumentException("Thread count must be positive.");
         if (args.length > 2) {
             if (args[2].isBlank()) throw new IllegalArgumentException("Upload directory cannot be blank.");
@@ -76,7 +85,7 @@ public class ConsumerMain extends Application implements Consumer<Path>, Runnabl
         if (server != null || stopped) throw new IllegalStateException("Server already started or stopped.");
         prepareDirectory();
         System.out.println("[SERVER] Starting consumer...");
-        System.out.println("[SERVER] Port: " + port);
+        System.out.println("[SERVER] Port: " + port + " (from " + portSource + ")");
         System.out.println("[SERVER] gRPC executor threads: " + grpcThreads);
         System.out.println("[SERVER] Upload directory: " + uploadDirectory);
         executor = Executors.newFixedThreadPool(grpcThreads);

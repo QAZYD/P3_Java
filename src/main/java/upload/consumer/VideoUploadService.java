@@ -52,9 +52,18 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
             //         Declare those fields here.
             private OutputStream out;
             private Path targetPath;
-            private long bytesWritten = 0;
             private boolean failed = false;
+            private String failureReason; // first reason this upload was rejected, sent back to the producer
             private String filename;
+
+            /** Marks the upload as failed (keeping the first reason) and deletes any partial file. */
+            private void reject(String reason) {
+                if (failureReason == null) {
+                    failureReason = reason;
+                }
+                failed = true;
+                cleanupUpload();
+            }
 
             @Override
             public void onNext(UploadChunk msg) {
@@ -63,8 +72,7 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                         // TODO 2: The first message. Decide where the file goes and open it for writing.
                         //         Hint: Files.newOutputStream(...) and uploadDir.resolve(...)
                         if (failed || filename != null || out != null){
-                            failed = true; 
-                            cleanupUpload();
+                            reject("filename sent more than once");
                             return;
                         }
 
@@ -72,19 +80,19 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                             Path incomingPath = Path.of(msg.getFilename());
 
                             if (incomingPath.getFileName() == null) {
-                                failed = true;
+                                reject("invalid filename: '" + msg.getFilename() + "'");
                                 return;
                             }
 
                             filename = incomingPath.getFileName().toString();
 
                         } catch (InvalidPathException e) {
-                            failed = true;
+                            reject("invalid filename: '" + msg.getFilename() + "'");
                             return;
                         }
 
                         if (filename.isBlank() || filename.equals(".") || filename.equals("..")){
-                            failed = true;
+                            reject("invalid filename: '" + msg.getFilename() + "'");
                             return;
                         }
                         int dotIndex = filename.lastIndexOf('.');
@@ -114,30 +122,25 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                     
                         
                         } catch(IOException e){
-                            failed = true;
-                             cleanupUpload();
-                        }  
+                            reject("server could not create the file: " + e.getMessage());
+                        }
                     }
 
                     case CHUNK -> {
                         // TODO 3: Write the bytes to the file.
                         //         Hint: msg.getChunk() returns a ByteString, which has writeTo(OutputStream).
                         if (failed || out == null){
-                            failed = true;
-                            cleanupUpload();
+                            reject("file data received before the filename");
                             return;
                         }
                         try{
                             msg.getChunk().writeTo(out);
-                            bytesWritten += msg.getChunk().size();
                         }catch(IOException e){
-                            failed = true;
-                            cleanupUpload();
+                            reject("server could not write the file: " + e.getMessage());
                         }
                     }
                     case DATA_NOT_SET -> {
-                        failed = true;
-                        cleanupUpload();
+                        reject("empty message (neither filename nor data)");
                     }
                 }
             }
@@ -149,11 +152,10 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                 //         responseObserver.onNext(UploadReply.newBuilder()...build());
                 //         responseObserver.onCompleted();
                 if(failed || out ==  null){
-                    failed = true;
-                    cleanupUpload();
+                    reject("no filename was sent");
                     UploadReply reply = UploadReply.newBuilder()
                         .setAccepted(false)
-                        .setMessage("upload failed")
+                        .setMessage("Upload rejected: " + failureReason)
                         .build();
                     responseObserver.onNext(reply);
                     responseObserver.onCompleted();
@@ -162,11 +164,10 @@ public class VideoUploadService extends VideoUploadGrpc.VideoUploadImplBase {
                 try{
                 out.close();
                 }catch(IOException e){
-                    failed = true; 
-                    cleanupUpload();
+                    reject("server could not save the file: " + e.getMessage());
                      UploadReply reply = UploadReply.newBuilder()
                         .setAccepted(false)
-                        .setMessage("upload failed")
+                        .setMessage("Upload rejected: " + failureReason)
                         .build();
                     responseObserver.onNext(reply);
                     responseObserver.onCompleted();

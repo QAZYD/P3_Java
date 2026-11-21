@@ -1,0 +1,16 @@
+# Per-machine network settings. Copy this file to "network.properties" in the project root
+# (the folder you run mvn from) and edit it. network.properties is git-ignored, so each
+# teammate / VM keeps its own.
+#
+# Priority (first match wins): command-line argument > environment variable > this file > Config defaults.
+
+# Where the producer connects. Examples:
+#   localhost        same machine (default)
+#   10.0.2.2         VirtualBox VM in NAT mode, consumer on the host PC
+#   192.168.56.1     VirtualBox host-only network, consumer on the host PC
+#   192.168.1.40     a teammate's laptop on the same Wi-Fi (use their ipconfig IPv4 address)
+#consumer.host=localhost
+
+# Port the consumer listens on and the producer connects to. Both sides must match.
+# Change it if Windows reserves 50051 (check: netsh interface ipv4 show excludedportrange protocol=tcp).
+#consumer.port=50051

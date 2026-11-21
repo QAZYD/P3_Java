@@ -28,15 +28,30 @@ import java.util.stream.Stream;
  *
  * Reads MP4s from Config.VIDEOS_DIR.
  * Run with: mvn exec:java -Dexec.mainClass=upload.producer.ProducerMain
+ * Another machine (PowerShell needs the quotes):
+ *   mvn exec:java "-Dexec.mainClass=upload.producer.ProducerMain" "-Dexec.args=192.168.1.40"
+ * or set CONSUMER_HOST, or put consumer.host=... in network.properties.
  */
 public class ProducerMain {
 
     public static void main(String[] args) {
         // Read p (number of producer threads) from config
         int p = Config.PRODUCER_THREADS;
-        System.out.printf("Starting %d producer thread(s) connecting to %s:%d...%n", p, Config.HOST, Config.PORT);
 
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(Config.HOST, Config.PORT)
+        // Consumer address: command-line arg > CONSUMER_HOST/CONSUMER_PORT > network.properties > Config defaults
+        Config.Setting host = Config.consumerHost(args);
+        Config.Setting portSetting = Config.consumerPort();
+        int port;
+        try {
+            port = portSetting.asPort();
+        } catch (IllegalArgumentException e) {
+            System.err.println("[CONFIG] " + e.getMessage());
+            return;
+        }
+        System.out.printf("Starting %d producer thread(s) connecting to %s:%d...%n", p, host.value(), port);
+        System.out.printf("  host from %s, port from %s%n", host.source(), portSetting.source());
+
+        ManagedChannel channel = ManagedChannelBuilder.forAddress(host.value(), port)
                 .usePlaintext()
                 .build();
 
